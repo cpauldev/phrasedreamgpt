@@ -371,7 +371,12 @@ class ArtifactSpec:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train FoundationGPT on character data.")
     parser.add_argument(
-        "--input", default="input.txt", help="Path to dataset text file (one sample per line)."
+        "--input",
+        default=None,
+        help=(
+            "Path to dataset text file (one sample per line). "
+            "When omitted, auto-selects from .txt files in the current directory."
+        ),
     )
     parser.add_argument("--steps", type=int, default=3000, help="Training steps.")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size.")
@@ -423,7 +428,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature.")
     parser.add_argument(
-        "--save-model",
+        "--save",
         nargs="?",
         const="auto",
         metavar="PATH",
@@ -433,19 +438,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--models-dir",
-        default="models",
-        help="Directory used for timestamped saves, --latest-model, and --list-models.",
+        "--datasets-dir",
+        default="datasets",
+        help="Directory to scan for .txt dataset files when --input is omitted.",
     )
     parser.add_argument(
-        "--export-output",
-        metavar="PATH",
-        help=(
-            "Output path for --export-model. Defaults to the source checkpoint base "
-            "name with `.model.pt`."
-        ),
+        "--models-dir",
+        default="models",
+        help="Directory used for timestamped saves and --models.",
     )
-    parser.add_argument("--strip-output", dest="export_output", help=argparse.SUPPRESS)
     parser.add_argument(
         "--compare",
         action="store_true",
@@ -457,37 +458,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-generate", action="store_true", help="Skip post-training text generation."
     )
-    checkpoint_group = parser.add_mutually_exclusive_group()
-    checkpoint_group.add_argument(
-        "--load-model",
-        metavar="PATH",
-        help="Load a saved model or checkpoint and skip training.",
-    )
-    checkpoint_group.add_argument(
-        "--export-model",
-        metavar="PATH",
-        help="Export an inference-only model file from a saved checkpoint.",
-    )
-    checkpoint_group.add_argument("--strip-model", dest="export_model", help=argparse.SUPPRESS)
-    checkpoint_group.add_argument(
-        "--resume-model",
-        metavar="PATH",
-        help="Resume training from a saved checkpoint.",
-    )
-    checkpoint_group.add_argument(
-        "--latest-model",
+    parser.add_argument(
+        "--models",
         action="store_true",
         help=(
-            "Load the newest saved artifact from --models-dir, preferring a model "
-            "artifact, and skip training."
-        ),
-    )
-    checkpoint_group.add_argument(
-        "--list-models",
-        action="store_true",
-        help=(
-            "Open an interactive artifact manager for loading, resuming, exporting, "
-            "inspecting, or deleting saved files."
+            "Open the interactive model manager for loading, resuming, exporting, "
+            "inspecting, or deleting saved artifacts."
         ),
     )
     return parser
@@ -532,42 +508,25 @@ def validate_args(args: argparse.Namespace) -> None:
             "Use a small positive value such as 0.8 or 0.5.",
         )
 
-    if args.compare and (
-        args.load_model
-        or args.export_model
-        or args.resume_model
-        or args.latest_model
-        or args.list_models
-    ):
+    if args.compare and args.models:
         fail(
-            "--compare cannot be combined with checkpoint loading or listing flags.",
-            "Run compare mode by itself, or remove --compare to load a saved checkpoint.",
+            "--compare cannot be combined with --models.",
+            "Run compare mode by itself, or use --models separately.",
         )
 
-    if args.compare and args.save_model is not None:
+    if args.compare and args.save is not None:
         fail(
-            "--compare cannot be combined with --save-model.",
+            "--compare cannot be combined with --save.",
             (
                 "Run a normal training command to save a checkpoint, or remove "
-                "--save-model for compare mode."
+                "--save for compare mode."
             ),
         )
 
-    if args.save_model is not None and (
-        args.load_model or args.export_model or args.latest_model or args.list_models
-    ):
+    if args.save is not None and args.models:
         fail(
-            (
-                "--save-model cannot be combined with --load-model, --export-model, "
-                "--latest-model, or --list-models."
-            ),
-            "Train a model to save it, or load/export/list checkpoints without --save-model.",
-        )
-
-    if args.export_output and not args.export_model:
-        fail(
-            "--export-output requires --export-model.",
-            "Pass --export-model PATH when you want to export an inference-only model file.",
+            "--save cannot be combined with --models.",
+            "Train a model to save it, or use --models to manage existing artifacts.",
         )
 
 
@@ -662,9 +621,11 @@ def load_dataset(path: str) -> Dataset:
         stream.append(bos_id)
 
     data = torch.tensor(stream, dtype=torch.long)
-    print(f"num docs: {len(docs)}")
-    print(f"vocab size: {vocab_size}")
-    print(f"num tokens: {data.numel()}")
+    print_section("dataset")
+    print(f"file    {Path(path).name}")
+    print(f"docs    {len(docs):,}")
+    print(f"vocab   {vocab_size} chars")
+    print(f"tokens  {data.numel():,}")
     return Dataset(data=data, id_to_char=id_to_char, bos_id=bos_id, vocab_size=vocab_size)
 
 
@@ -753,27 +714,47 @@ def print_available_artifacts(models_dir: Path) -> None:
         print(f"no saved checkpoint or model files found in {models_dir}")
         return
 
-    print(f"saved artifacts in {models_dir}:")
-    for index, path in enumerate(artifacts, start=1):
-        modified_at = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        size = format_file_size(path.stat().st_size)
-        artifact_type = infer_artifact_type_from_path(path)
+    rows = []
+    for path in artifacts:
+        stat = path.stat()
+        rows.append(
+            (
+                path.name,
+                infer_artifact_type_from_path(path),
+                datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                format_file_size(stat.st_size),
+            )
+        )
+
+    index_w = len(str(len(rows)))
+    name_w = max(len(r[0]) for r in rows + [("name", "", "", "")])
+    type_w = max(len(r[1]) for r in rows + [("", "type", "", "")])
+    size_w = max(len(r[3]) for r in rows + [("", "", "", "size")])
+
+    pad = " " * (index_w + 2)
+    print(f"{pad}{'name':{name_w}}  {'type':{type_w}}  {'modified':{19}}  {'size':>{size_w}}")
+    print(f"{pad}{'-' * name_w}  {'-' * type_w}  {'-' * 19}  {'-' * size_w}")
+    for index, (name, artifact_type, modified_at, size) in enumerate(rows, start=1):
         print(
-            f"{index:2d}. {path.name} | type {artifact_type} | modified {modified_at} | size {size}"
+            f"{index:{index_w}d}. {name:{name_w}}  "
+            f"{artifact_type:{type_w}}  {modified_at}  {size:>{size_w}}"
         )
 
 
-def default_artifact_base_path(models_dir: Path) -> Path:
+def default_artifact_base_path(models_dir: Path, input_stem: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return models_dir / f"foundationgpt_{timestamp}"
+    return models_dir / f"{input_stem}_{timestamp}"
 
 
-def resolve_save_paths(save_model_arg: str | None, models_dir: Path) -> ArtifactPaths | None:
+def resolve_save_paths(
+    save_model_arg: str | None, models_dir: Path, input_stem: str = "foundationgpt"
+) -> ArtifactPaths | None:
     if save_model_arg is None:
         return None
     if save_model_arg == "auto":
-        return describe_artifact_path(default_artifact_base_path(models_dir)).paired_paths
-
+        return describe_artifact_path(
+            default_artifact_base_path(models_dir, input_stem)
+        ).paired_paths
     return describe_artifact_path(Path(save_model_arg)).save_paths()
 
 
@@ -794,9 +775,10 @@ def resolve_resume_save_paths(
     save_model_arg: str | None,
     source_checkpoint_path: Path,
     models_dir: Path,
+    input_stem: str = "foundationgpt",
 ) -> ArtifactPaths:
     if save_model_arg is not None:
-        resolved_paths = resolve_save_paths(save_model_arg, models_dir)
+        resolved_paths = resolve_save_paths(save_model_arg, models_dir, input_stem)
         if resolved_paths is None:
             fail("Internal error: resume save paths were not resolved.", "Retry the command.")
         return resolved_paths
@@ -807,24 +789,60 @@ def resolve_resume_save_paths(
     )
 
 
-def latest_loadable_artifact_path(models_dir: Path) -> Path:
-    artifacts = list_artifact_files(models_dir)
-    if not artifacts:
+def list_input_files(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
+    return sorted(p for p in directory.iterdir() if p.is_file() and p.suffix == ".txt")
+
+
+def select_input_file(input_arg: str | None, scan_dir: Path) -> Path:
+    if input_arg is not None:
+        path = Path(input_arg)
+        if not path.exists():
+            fail(
+                f"Input file not found: {path}",
+                "Pass a valid dataset file with --input PATH.",
+            )
+        return path
+
+    candidates = list_input_files(scan_dir)
+
+    if not candidates:
         fail(
-            f"No saved model or checkpoint files were found in {models_dir}.",
-            "Train with --save-model first, or point --load-model to an existing file.",
+            f"No .txt dataset files found in {scan_dir}.",
+            (
+                "Add a .txt file with one sample per line, "
+                "or pass --input PATH to specify a file explicitly."
+            ),
         )
 
-    for path in artifacts:
-        if infer_artifact_type_from_path(path) == "model":
-            return path
-    return artifacts[0]
+    if len(candidates) == 1:
+        print(f"dataset  {candidates[0].name}")
+        return candidates[0]
 
+    if not sys.stdin.isatty():
+        fail(
+            f"Multiple .txt files found in {scan_dir} but stdin is not a terminal.",
+            "Pass --input PATH to specify a dataset file explicitly.",
+        )
 
-def resolve_artifact_to_load(args: argparse.Namespace, models_dir: Path) -> Path:
-    if args.load_model:
-        return Path(args.load_model)
-    return latest_loadable_artifact_path(models_dir)
+    print_section("dataset")
+    for index, path in enumerate(candidates, start=1):
+        print(f"{index}  {path.name}")
+    print()
+
+    while True:
+        selection = prompt_user("select: ").lower()
+        if selection in {"q", "quit", "exit"}:
+            raise SystemExit(0)
+        if not selection.isdigit():
+            print("enter a valid number")
+            continue
+        index = int(selection)
+        if not 1 <= index <= len(candidates):
+            print(f"selection must be between 1 and {len(candidates)}")
+            continue
+        return candidates[index - 1]
 
 
 def unwrap_model(model: nn.Module) -> nn.Module:
@@ -836,6 +854,59 @@ def prompt_user(prompt: str) -> str:
         return input(prompt).strip()
     except EOFError:
         return "q"
+
+
+def prompt_with_default(label: str, default: str, choices: str = "") -> str:
+    hint = f"  ({choices})" if choices else ""
+    response = prompt_user(f"{label}{hint}  [{default}]: ")
+    return response.strip() if response.strip() else default
+
+
+def prompt_positive_int(label: str, default: int, choices: str = "") -> int:
+    while True:
+        value = prompt_with_default(label, str(default), choices)
+        try:
+            n = int(value)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+        print(f"{label.strip()} must be a positive integer")
+
+
+def prompt_non_negative_int(label: str, default: int) -> int:
+    while True:
+        value = prompt_with_default(label, str(default))
+        try:
+            n = int(value)
+            if n >= 0:
+                return n
+        except ValueError:
+            pass
+        print(f"{label.strip()} must be 0 or a positive integer")
+
+
+def prompt_positive_float(label: str, default: float) -> float:
+    while True:
+        value = prompt_with_default(label, str(default))
+        try:
+            n = float(value)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+        print(f"{label.strip()} must be a positive number")
+
+
+def prompt_bool(label: str, default: bool = False) -> bool:
+    default_str = "y" if default else "n"
+    while True:
+        value = prompt_with_default(label, default_str, "y/n").lower()
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        print(f"{label.strip()}: enter y or n")
 
 
 def dtype_name(dtype: torch.dtype | None) -> str | None:
@@ -1011,6 +1082,7 @@ def build_training_checkpoint(
         },
         "dataset_data": dataset.data.cpu(),
         "training_config": {
+            "input_path": args.input,
             "seed": args.seed,
             "steps": completed_steps,
             "last_run_steps": args.steps,
@@ -1410,6 +1482,8 @@ def print_artifact_details(artifact_path: Path) -> None:
         f"characters={len(tokenizer['id_to_char'])}"
     )
     if training_config:
+        if training_config.get("input_path"):
+            print(f"input_path: {training_config['input_path']}")
         print(
             "training: "
             f"steps={training_config.get('steps', 'unknown')}, "
@@ -1663,9 +1737,38 @@ def train_once(
 
     total_tokens = total_tokens_before
     final_loss = float("nan")
+    target_total_steps = completed_steps_before + steps
+
+    raw_model = unwrap_model(model)
+    param_count = sum(p.numel() for p in raw_model.parameters())
+    cfg = raw_model.config
+
+    device_label = str(device)
+    if device.type == "cuda":
+        device_label += f"  ({torch.cuda.get_device_name(0)})"
+    amp_label = runtime.amp_dtype if runtime.amp_enabled else "off"
+
+    print_section("model")
+    print(f"params   {param_count:,}")
+    print(f"layers   {cfg.n_layer}")
+    print(f"heads    {cfg.n_head}")
+    print(f"embd     {cfg.n_embd}")
+    print(f"block    {cfg.block_size}")
+
+    print_section("training")
+    print(f"device   {device_label}")
+    print(f"amp      {amp_label}")
+    print(f"compile  {'on' if runtime.compile_enabled else 'off'}")
+    print(f"steps    {target_total_steps:,}")
+    print(f"batch    {args.batch_size}")
+    print(f"lr       {args.learning_rate:.2e}")
+    if resume_artifact is not None:
+        print(f"from     step {completed_steps_before:,}")
+    print()
+
+    step_w = len(str(target_total_steps))
     started_at = time.perf_counter()
     model.train()
-    target_total_steps = completed_steps_before + steps
 
     for step in range(steps):
         global_step = completed_steps_before + step
@@ -1697,8 +1800,10 @@ def train_once(
             tok_s = run_tokens / elapsed
             steps_s = (step + 1) / elapsed
             print(
-                f"[{label}] step {global_step + 1:5d}/{target_total_steps:5d} | "
-                f"loss {final_loss:.4f} | tok/s {tok_s:,.0f} | step/s {steps_s:,.2f}",
+                f"step {global_step + 1:{step_w}d}/{target_total_steps}"
+                f"  loss {final_loss:.4f}"
+                f"  tok/s {tok_s:,.0f}"
+                f"  step/s {steps_s:.2f}",
                 flush=True,
             )
 
@@ -1752,31 +1857,59 @@ def generate_samples(
     return samples
 
 
-def run_compare(args: argparse.Namespace, dataset: Dataset) -> None:
-    if not torch.cuda.is_available():
-        fail(
-            "--compare was requested but CUDA is not available.",
-            "Install a CUDA-enabled PyTorch build or rerun without --compare.",
-        )
+def _detect_compare_accelerator() -> tuple[torch.device, str] | None:
+    if torch.cuda.is_available():
+        return torch.device("cuda"), "cuda"
+    if has_mps():
+        return torch.device("mps"), "mps"
+    return None
+
+
+def run_compare(
+    args: argparse.Namespace,
+    dataset: Dataset,
+    *,
+    accel_device: torch.device | None = None,
+    accel_label: str | None = None,
+) -> None:
+    if accel_device is None or accel_label is None:
+        detected = _detect_compare_accelerator()
+        if detected is None:
+            fail(
+                "benchmark requires an accelerator but neither CUDA nor MPS is available.",
+                "Install a CUDA-enabled PyTorch build or run on Apple Silicon with MPS support.",
+            )
+        accel_device, accel_label = detected
+        print_section("benchmark")
+        label_w = len("accelerator")
+        print(f"{'accelerator':{label_w}}  {accel_label}")
+        print(f"{'comparing':{label_w}}  cpu vs {accel_label}")
 
     compare_steps = args.compare_steps
-    print(f"running CPU benchmark for {compare_steps} steps...")
-    cpu_result = train_once(args, dataset, torch.device("cpu"), compare_steps, "CPU")
+    print(f"\nrunning cpu for {compare_steps} steps...")
+    cpu_result = train_once(args, dataset, torch.device("cpu"), compare_steps, "cpu")
 
-    print(f"running CUDA benchmark for {compare_steps} steps...")
-    cuda_result = train_once(args, dataset, torch.device("cuda"), compare_steps, "CUDA")
+    print(f"\nrunning {accel_label} for {compare_steps} steps...")
+    accel_result = train_once(args, dataset, accel_device, compare_steps, accel_label)
 
-    speedup = cuda_result.tok_s / max(cpu_result.tok_s, 1e-9)
-    print("--- compare summary ---")
-    print(f"CPU  tok/s: {cpu_result.tok_s:,.0f} | elapsed: {cpu_result.elapsed:.2f}s")
-    print(f"CUDA tok/s: {cuda_result.tok_s:,.0f} | elapsed: {cuda_result.elapsed:.2f}s")
-    print(f"speedup: {speedup:.2f}x")
+    speedup = accel_result.tok_s / max(cpu_result.tok_s, 1e-9)
+    print_section("compare")
+    print(f"cpu   tok/s    {cpu_result.tok_s:,.0f}")
+    print(f"cpu   elapsed  {cpu_result.elapsed:.2f}s")
+    print(f"{accel_label}  tok/s    {accel_result.tok_s:,.0f}")
+    print(f"{accel_label}  elapsed  {accel_result.elapsed:.2f}s")
+    print(f"speedup        {speedup:.2f}x")
+
+
+def print_section(title: str) -> None:
+    print(f"\n--- {title} ---")
 
 
 def print_training_summary(result: TrainingResult) -> None:
     print(
-        f"done | final loss {result.final_loss:.4f} | "
-        f"tok/s {result.tok_s:,.0f} | elapsed {result.elapsed:.2f}s"
+        f"\ndone  elapsed {result.elapsed:.2f}s"
+        f"  loss {result.final_loss:.4f}"
+        f"  tok/s {result.tok_s:,.0f}"
     )
 
 
@@ -1801,15 +1934,11 @@ def save_training_result_artifacts(
 
 
 def print_saved_artifact_paths(artifact_paths: ArtifactPaths, *, updated: bool) -> None:
-    verb = "updated" if updated else "saved"
-    print(f"{verb} checkpoint: {artifact_paths.checkpoint}")
-    print(f"{verb} model: {artifact_paths.model}")
-
-
-def print_runtime_device(device: torch.device) -> None:
-    print(f"using device: {device}")
-    if device.type == "cuda":
-        print(f"cuda device: {torch.cuda.get_device_name(0)}")
+    print_section("updated" if updated else "saved")
+    cp_size = format_file_size(artifact_paths.checkpoint.stat().st_size)
+    m_size = format_file_size(artifact_paths.model.stat().st_size)
+    print(f"checkpoint  {artifact_paths.checkpoint}  ({cp_size})")
+    print(f"model       {artifact_paths.model}  ({m_size})")
 
 
 def run_generation(
@@ -1834,7 +1963,7 @@ def run_generation(
             f"using {generation_block_size} for generation"
         )
 
-    print("--- inference (generated text samples) ---")
+    print_section("samples")
     for index, text in enumerate(
         generate_samples(
             model,
@@ -1846,7 +1975,7 @@ def run_generation(
         ),
         start=1,
     ):
-        print(f"sample {index:2d}: {text}")
+        print(f"{index:2d}  {text}")
 
 
 def maybe_run_generation(
@@ -1875,19 +2004,16 @@ def run_artifact_inference_for_path(
     dataset = dataset_from_artifact(artifact)
     model = build_model_from_artifact(artifact, device)
 
-    print_runtime_device(device)
-    print(f"loaded artifact: {artifact_path}")
+    device_str = (
+        f"{device}  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else str(device)
+    )
+    print_section("loaded")
+    print(f"device    {device_str}")
+    print(f"artifact  {artifact_path}")
     if artifact.get("created_at"):
-        print(f"artifact created: {artifact['created_at']}")
+        print(f"created   {artifact['created_at']}")
 
     maybe_run_generation(args, model, dataset, device)
-
-
-def run_artifact_inference(
-    args: argparse.Namespace, device: torch.device, models_dir: Path
-) -> None:
-    artifact_path = resolve_artifact_to_load(args, models_dir)
-    run_artifact_inference_for_path(args, device, artifact_path)
 
 
 def run_resume_training_for_path(
@@ -1900,11 +2026,12 @@ def run_resume_training_for_path(
     dataset = dataset_from_artifact(artifact)
     ensure_dataset_supports_block_size(dataset, resumed_args.block_size)
 
-    print_runtime_device(device)
-    print(f"resuming checkpoint: {checkpoint_path}")
-    print(
-        f"continuing from step {artifact['resume_state']['completed_steps']} "
-        f"for {resumed_args.steps} additional steps"
+    training_config = artifact.get("training_config", {})
+    original_input = training_config.get("input_path")
+    input_stem = (
+        Path(original_input).stem
+        if original_input
+        else describe_artifact_path(checkpoint_path).base_path.name
     )
 
     result = train_once(
@@ -1921,9 +2048,9 @@ def run_resume_training_for_path(
         result,
         dataset,
         resumed_args,
-        resolve_resume_save_paths(user_args.save_model, checkpoint_path, models_dir),
+        resolve_resume_save_paths(user_args.save, checkpoint_path, models_dir, input_stem),
     )
-    print_saved_artifact_paths(saved_paths, updated=user_args.save_model is None)
+    print_saved_artifact_paths(saved_paths, updated=user_args.save is None)
     maybe_run_generation(user_args, result.model, dataset, device)
 
 
@@ -1952,6 +2079,145 @@ def delete_artifact_file(artifact_path: Path) -> None:
     print(f"deleted artifact: {artifact_path}")
 
 
+def prompt_train_settings(args: argparse.Namespace) -> argparse.Namespace:
+    print_section("train settings")
+    new_args = argparse.Namespace(**vars(args))
+
+    labels = ["device", "steps", "advanced", "save", "path", "samples", "temp"]
+    label_w = max(len(s) for s in labels)
+
+    new_args.device = prompt_with_default(
+        f"{'device':{label_w}}", new_args.device, "auto/cpu/cuda/mps"
+    )
+    new_args.steps = prompt_positive_int(f"{'steps':{label_w}}", new_args.steps)
+
+    if prompt_bool(f"{'advanced':{label_w}}", False):
+        adv_labels = ["batch", "block", "layers", "embd", "heads", "lr"]
+        adv_w = max(len(s) for s in adv_labels)
+        new_args.batch_size = prompt_positive_int(f"{'batch':{adv_w}}", new_args.batch_size)
+        new_args.block_size = prompt_positive_int(f"{'block':{adv_w}}", new_args.block_size)
+        new_args.n_layer = prompt_positive_int(f"{'layers':{adv_w}}", new_args.n_layer)
+        new_args.n_embd = prompt_positive_int(f"{'embd':{adv_w}}", new_args.n_embd)
+        new_args.n_head = prompt_positive_int(f"{'heads':{adv_w}}", new_args.n_head)
+        new_args.learning_rate = prompt_positive_float(f"{'lr':{adv_w}}", new_args.learning_rate)
+
+    if prompt_bool(f"{'save':{label_w}}", new_args.save is not None):
+        path_input = prompt_with_default(f"{'path':{label_w}}", "auto")
+        new_args.save = path_input
+    else:
+        new_args.save = None
+
+    new_args.samples = prompt_non_negative_int(f"{'samples':{label_w}}", new_args.samples)
+    if new_args.samples > 0:
+        new_args.temperature = prompt_positive_float(f"{'temp':{label_w}}", new_args.temperature)
+
+    return new_args
+
+
+def prompt_resume_settings(args: argparse.Namespace) -> argparse.Namespace:
+    print_section("resume settings")
+    new_args = argparse.Namespace(**vars(args))
+
+    labels = ["steps", "new path", "path", "samples", "temp"]
+    label_w = max(len(s) for s in labels)
+
+    new_args.steps = prompt_positive_int(f"{'steps':{label_w}}", new_args.steps)
+
+    if prompt_bool(f"{'new path':{label_w}}", new_args.save is not None):
+        path_input = prompt_with_default(f"{'path':{label_w}}", "auto")
+        new_args.save = path_input
+    else:
+        new_args.save = None
+
+    new_args.samples = prompt_non_negative_int(f"{'samples':{label_w}}", new_args.samples)
+    if new_args.samples > 0:
+        new_args.temperature = prompt_positive_float(f"{'temp':{label_w}}", new_args.temperature)
+
+    return new_args
+
+
+def prompt_load_settings(args: argparse.Namespace) -> argparse.Namespace:
+    print_section("load settings")
+    new_args = argparse.Namespace(**vars(args))
+
+    labels = ["samples", "temp"]
+    label_w = max(len(s) for s in labels)
+
+    new_args.samples = prompt_non_negative_int(f"{'samples':{label_w}}", new_args.samples)
+    if new_args.samples > 0:
+        new_args.temperature = prompt_positive_float(f"{'temp':{label_w}}", new_args.temperature)
+
+    return new_args
+
+
+def prompt_export_settings() -> str | None:
+    print_section("export settings")
+    label_w = len("output path")
+    sentinel = "default .model.pt"
+    path = prompt_with_default(f"{'output path':{label_w}}", sentinel)
+    return None if path == sentinel else path
+
+
+def prompt_benchmark_settings(args: argparse.Namespace) -> argparse.Namespace:
+    print_section("benchmark settings")
+    new_args = argparse.Namespace(**vars(args))
+    new_args.compare_steps = prompt_positive_int("steps per device", new_args.compare_steps)
+    new_args.compare = True
+    return new_args
+
+
+def main_menu(args: argparse.Namespace, models_dir: Path) -> None:
+    while True:
+        print_section("foundationgpt")
+        print()
+        print("1  train")
+        print("2  models")
+        print("3  benchmark")
+        print("Q  quit")
+        print()
+        choice = prompt_user("select: ").lower()
+
+        if choice in {"q", "quit", "exit"}:
+            return
+
+        if choice in {"1", "t", "train"}:
+            datasets_dir = Path(args.datasets_dir)
+            input_path = select_input_file(args.input, datasets_dir)
+            train_args = argparse.Namespace(**vars(args))
+            train_args.input = str(input_path)
+            dataset = load_dataset(train_args.input)
+            train_args = prompt_train_settings(train_args)
+            seed_everything(train_args.seed)
+            device = resolve_device(train_args.device)
+            run_training(train_args, device, models_dir, dataset=dataset)
+            continue
+
+        if choice in {"2", "m", "models"}:
+            interactive_artifact_manager(args, models_dir)
+            continue
+
+        if choice in {"3", "b", "benchmark"}:
+            detected = _detect_compare_accelerator()
+            if detected is None:
+                print("benchmark requires an accelerator (CUDA or MPS) — none detected")
+                continue
+            accel_device, accel_label = detected
+            datasets_dir = Path(args.datasets_dir)
+            input_path = select_input_file(args.input, datasets_dir)
+            bench_args = argparse.Namespace(**vars(args))
+            bench_args.input = str(input_path)
+            dataset = load_dataset(bench_args.input)
+            print_section("benchmark")
+            label_w = len("accelerator")
+            print(f"{'accelerator':{label_w}}  {accel_label}")
+            print(f"{'comparing':{label_w}}  cpu vs {accel_label}")
+            bench_args = prompt_benchmark_settings(bench_args)
+            run_compare(bench_args, dataset, accel_device=accel_device, accel_label=accel_label)
+            continue
+
+        print("enter 1, 2, 3, or Q")
+
+
 def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> None:
     if not sys.stdin.isatty():
         print_available_artifacts(models_dir)
@@ -1978,30 +2244,47 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
             continue
 
         artifact_path = artifacts[index - 1]
+        is_checkpoint = infer_artifact_type_from_path(artifact_path) == "checkpoint"
 
         while True:
-            print(f"selected artifact: {artifact_path.name}")
-            action = prompt_user(
-                "[L]oad, [R]esume, [E]xport, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
-            ).lower()
+            print(f"selected: {artifact_path.name}")
+            if is_checkpoint:
+                action_prompt = (
+                    "[L]oad, [R]esume, [E]xport, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
+                )
+                invalid_msg = "enter L, R, E, I, D, B, or Q"
+            else:
+                action_prompt = "[L]oad, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
+                invalid_msg = "enter L, I, D, B, or Q"
+
+            action = prompt_user(action_prompt).lower()
 
             if action in {"l", "load"}:
-                seed_everything(args.seed)
-                device = resolve_device(args.device)
-                run_artifact_inference_for_path(args, device, artifact_path)
+                load_args = prompt_load_settings(args)
+                seed_everything(load_args.seed)
+                device = resolve_device(load_args.device)
+                run_artifact_inference_for_path(load_args, device, artifact_path)
                 return
 
-            if action in {"r", "resume"}:
-                device = resolve_device(args.device)
-                run_resume_training_for_path(args, device, artifact_path, models_dir)
+            if action in {"r", "resume"} and is_checkpoint:
+                preview = load_artifact_file(artifact_path, torch.device("cpu"))
+                require_exact_resume_artifact(preview, artifact_path)
+                training_config = preview.get("training_config", {})
+                resume_state = preview.get("resume_state", {})
+                print_section("resume")
+                print(f"checkpoint  {artifact_path.name}")
+                if training_config.get("input_path"):
+                    print(f"dataset     {training_config['input_path']}")
+                if "completed_steps" in resume_state:
+                    print(f"completed   {resume_state['completed_steps']:,} steps")
+                resume_args = prompt_resume_settings(args)
+                device = resolve_device(resume_args.device)
+                run_resume_training_for_path(resume_args, device, artifact_path, models_dir)
                 return
 
-            if action in {"e", "export"}:
-                custom_output = prompt_user(
-                    "enter output path for the exported model, or press Enter to "
-                    "use the default `.model.pt` name: "
-                )
-                run_export_model_for_path(artifact_path, custom_output or None)
+            if action in {"e", "export"} and is_checkpoint:
+                export_output = prompt_export_settings()
+                run_export_model_for_path(artifact_path, export_output)
                 return
 
             if action in {"i", "inspect", "view"}:
@@ -2024,23 +2307,30 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
             if action in {"q", "quit", "exit"}:
                 return
 
-            print("enter L, R, E, I, D, B, or Q")
+            print(invalid_msg)
 
 
-def run_training(args: argparse.Namespace, device: torch.device, models_dir: Path) -> None:
-    dataset = load_dataset(args.input)
+def run_training(
+    args: argparse.Namespace,
+    device: torch.device,
+    models_dir: Path,
+    *,
+    dataset: Dataset | None = None,
+) -> None:
+    if dataset is None:
+        dataset = load_dataset(args.input)
     ensure_dataset_supports_block_size(dataset, args.block_size)
+
+    input_stem = Path(args.input).stem
 
     if args.compare:
         run_compare(args, dataset)
         return
 
-    print_runtime_device(device)
-
     result = train_once(args, dataset, device, args.steps, str(device).upper())
     print_training_summary(result)
 
-    artifact_paths = resolve_save_paths(args.save_model, models_dir)
+    artifact_paths = resolve_save_paths(args.save, models_dir, input_stem)
     if artifact_paths is not None:
         saved_paths = save_training_result_artifacts(result, dataset, args, artifact_paths)
         print_saved_artifact_paths(saved_paths, updated=False)
@@ -2052,26 +2342,16 @@ def main() -> None:
     args = parse_args()
     models_dir = Path(args.models_dir)
 
-    if args.list_models:
+    if args.models:
         interactive_artifact_manager(args, models_dir)
         return
 
+    if len(sys.argv) == 1:
+        main_menu(args, models_dir)
+        return
+
     seed_everything(args.seed)
-
-    if args.resume_model:
-        device = resolve_device(args.device)
-        run_resume_training_for_path(args, device, Path(args.resume_model), models_dir)
-        return
-
-    if args.export_model:
-        run_export_model_for_path(Path(args.export_model), args.export_output)
-        return
-
-    if args.load_model or args.latest_model:
-        device = resolve_device(args.device)
-        run_artifact_inference(args, device, models_dir)
-        return
-
+    args.input = str(select_input_file(args.input, Path(args.datasets_dir)))
     device = torch.device("cpu") if args.compare else resolve_device(args.device)
     run_training(args, device, models_dir)
 
