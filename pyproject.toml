@@ -1,5 +1,5 @@
 [project]
-name = "foundationgpt"
+name = "phrasedreamgpt"
 version = "0.1.0"
 description = "A single-file Character Language Model (CLM) trainer and inference script."
 readme = "README.md"

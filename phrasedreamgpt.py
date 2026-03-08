@@ -1,14 +1,19 @@
 """
-FoundationGPT: train a character-level GPT model from newline-delimited text.
+PhraseDreamGPT: train a character-level GPT model from newline-delimited text.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import random
+import shutil
+import struct
 import sys
+import tempfile
 import time
+import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +45,13 @@ def fail(message: str, hint: str | None = None) -> NoReturn:
     if hint:
         raise SystemExit(f"{message}\nHow to fix it: {hint}")
     raise SystemExit(message)
+
+
+def ensure_utf8_stdio() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -84,22 +96,119 @@ class TrainingResult:
 
 @dataclass(frozen=True)
 class ArtifactPaths:
-    checkpoint: Path
+    directory: Path
+    resume: Path
     model: Path
+    js_bundle: Path
 
 
 ARTIFACT_SCHEMA_HINT = "Use a file created by this script, or retrain and save a new one."
 RESUME_ARTIFACT_HINT = (
-    "Resume from a checkpoint artifact that includes dataset, optimizer, scaler, and RNG state, "
-    "or use --load-model for generation only."
+    "Resume from a saved model that still has its resume companion data, "
+    "or load the model from the interactive models menu for generation only."
 )
 MODEL_MLP_TYPE = "swiglu"
+JS_BUNDLE_MAGIC = b"PDBGONNX"
+JS_BUNDLE_FORMAT = "phrasedreamgpt-onnx-bundle"
+JS_BUNDLE_VERSION = 1
 
 
 def artifact_subject(label: str, artifact_path: Path | None = None) -> str:
     if artifact_path is None:
         return label
     return f"{label} ({artifact_path})"
+
+
+def build_artifact_paths(run_dir: Path, stem: str, extension: str = ".pt") -> ArtifactPaths:
+    return ArtifactPaths(
+        directory=run_dir,
+        resume=run_dir / f"{stem}.resume{extension}",
+        model=run_dir / f"{stem}.model{extension}",
+        js_bundle=run_dir / f"{stem}.model",
+    )
+
+
+def build_staged_artifact_paths(final_paths: ArtifactPaths, staging_dir: Path) -> ArtifactPaths:
+    return ArtifactPaths(
+        directory=staging_dir,
+        resume=staging_dir / final_paths.resume.name,
+        model=staging_dir / final_paths.model.name,
+        js_bundle=staging_dir / final_paths.js_bundle.name,
+    )
+
+
+def legacy_resume_path(final_paths: ArtifactPaths) -> Path:
+    return final_paths.resume.with_name(
+        final_paths.resume.name.replace(".resume", ".checkpoint", 1)
+    )
+
+
+def allowed_artifact_names(final_paths: ArtifactPaths) -> set[str]:
+    return {
+        final_paths.model.name,
+        final_paths.resume.name,
+        legacy_resume_path(final_paths).name,
+        final_paths.js_bundle.name,
+    }
+
+
+def create_staging_directory(final_dir: Path) -> Path:
+    final_dir.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f".{final_dir.name}.staging-", dir=final_dir.parent))
+
+
+def ensure_artifact_directory_safe(final_paths: ArtifactPaths) -> None:
+    final_dir = final_paths.directory
+    if not final_dir.exists():
+        return
+
+    if not final_dir.is_dir():
+        fail(
+            f"Save destination exists but is not a directory: {final_dir}",
+            "Choose a different save path.",
+        )
+
+    unexpected_entries = [
+        entry.name
+        for entry in final_dir.iterdir()
+        if entry.name not in allowed_artifact_names(final_paths)
+    ]
+    if unexpected_entries:
+        fail(
+            f"Refusing to overwrite non-artifact files in {final_dir}.",
+            ("Move or remove these files first: " + ", ".join(sorted(unexpected_entries))),
+        )
+
+
+def commit_staged_directory(staging_dir: Path, final_dir: Path) -> None:
+    backup_dir: Path | None = None
+    final_dir = final_dir.resolve()
+    staging_dir = staging_dir.resolve()
+
+    try:
+        if final_dir.exists():
+            backup_dir = final_dir.parent / f".{final_dir.name}.backup-{time.time_ns()}"
+            final_dir.rename(backup_dir)
+
+        staging_dir.rename(final_dir)
+    except Exception as exc:
+        if backup_dir is not None and backup_dir.exists() and not final_dir.exists():
+            try:
+                backup_dir.rename(final_dir)
+            except OSError:
+                pass
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        fail(
+            f"Failed to save artifact set into {final_dir}.",
+            (
+                "The previous saved run was left untouched. "
+                f"Retry the save after fixing the underlying error. Original error: {exc}"
+            ),
+        )
+
+    if backup_dir is not None and backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def swiglu_hidden_dim(n_embd: int) -> int:
@@ -295,12 +404,17 @@ class ModelConfig:
 
 ARTIFACT_EXTENSIONS = frozenset({".pt", ".pth"})
 ARTIFACT_SUFFIXES = (
-    (".checkpoint.pt", "checkpoint", ".pt"),
-    (".checkpoint.pth", "checkpoint", ".pth"),
+    (".resume.pt", "resume", ".pt"),
+    (".resume.pth", "resume", ".pth"),
+    (".checkpoint.pt", "resume", ".pt"),
+    (".checkpoint.pth", "resume", ".pth"),
     (".model.pt", "model", ".pt"),
     (".model.pth", "model", ".pth"),
 )
 MODEL_ARTIFACT_KEYS = frozenset({"model_config", "tokenizer", "state_dict"})
+RESUME_ARTIFACT_KEYS = frozenset(
+    {"training_config", "dataset_data", "optimizer_state", "resume_state", "rng_state"}
+)
 MODEL_CONFIG_KEYS = frozenset(
     {"vocab_size", "block_size", "n_layer", "n_embd", "n_head", "mlp_type", "mlp_hidden_dim"}
 )
@@ -312,8 +426,9 @@ RESUME_TRAINING_CONFIG_KEYS = frozenset(
     {"batch_size", "learning_rate", "beta1", "beta2", "eps", "weight_decay"}
 )
 ARTIFACT_TYPE_ALIASES = {
-    "checkpoint": "checkpoint",
-    "training": "checkpoint",
+    "checkpoint": "resume",
+    "training": "resume",
+    "resume": "resume",
     "model": "model",
     "inference": "model",
 }
@@ -331,51 +446,105 @@ class ArtifactSpec:
         return self.path.suffix in ARTIFACT_EXTENSIONS
 
     @property
+    def artifact_directory(self) -> Path:
+        if self.explicit_type is None and not self.has_tensor_extension:
+            return self.path
+        return self.path.parent
+
+    @property
+    def artifact_stem(self) -> str:
+        if self.explicit_type is None and not self.has_tensor_extension:
+            return self.path.name
+        return self.base_path.name
+
+    @property
     def paired_paths(self) -> ArtifactPaths:
-        return ArtifactPaths(
-            checkpoint=self.base_path.with_name(
-                f"{self.base_path.name}.checkpoint{self.extension}"
-            ),
-            model=self.base_path.with_name(f"{self.base_path.name}.model{self.extension}"),
-        )
+        return build_artifact_paths(self.artifact_directory, self.artifact_stem, self.extension)
 
     def save_paths(self) -> ArtifactPaths:
-        if self.explicit_type == "checkpoint":
-            return ArtifactPaths(checkpoint=self.path, model=self.paired_paths.model)
+        paired_paths = self.paired_paths
+        if self.explicit_type == "resume":
+            return ArtifactPaths(
+                directory=paired_paths.directory,
+                resume=self.path,
+                model=paired_paths.model,
+                js_bundle=paired_paths.js_bundle,
+            )
         if self.explicit_type == "model":
-            return self.paired_paths
+            return ArtifactPaths(
+                directory=paired_paths.directory,
+                resume=paired_paths.resume,
+                model=self.path,
+                js_bundle=paired_paths.js_bundle,
+            )
         if self.has_tensor_extension:
             return ArtifactPaths(
-                checkpoint=self.path,
-                model=self.path.with_name(f"{self.path.stem}.model{self.path.suffix}"),
+                directory=self.path.parent,
+                resume=self.path,
+                model=paired_paths.model,
+                js_bundle=paired_paths.js_bundle,
             )
-        return self.paired_paths
+        return paired_paths
 
-    def companion_model_path(self) -> Path:
-        if self.explicit_type == "model":
-            return self.path
-        if self.explicit_type == "checkpoint":
-            return self.paired_paths.model
-        if self.has_tensor_extension:
-            return self.path.with_name(f"{self.path.stem}.model{self.path.suffix}")
-        return self.paired_paths.model
 
-    def export_output_path(self) -> Path:
-        if self.explicit_type == "checkpoint":
-            return self.paired_paths.model
-        if self.explicit_type == "model" or self.has_tensor_extension:
-            return self.path
-        return self.paired_paths.model
+def resume_companion_candidates(path: Path) -> list[Path]:
+    artifact_spec = describe_artifact_path(path)
+    return [
+        artifact_spec.artifact_directory
+        / f"{artifact_spec.artifact_stem}.resume{artifact_spec.extension}",
+        artifact_spec.artifact_directory
+        / f"{artifact_spec.artifact_stem}.checkpoint{artifact_spec.extension}",
+    ]
+
+
+def find_existing_resume_companion(path: Path) -> Path | None:
+    for candidate in resume_companion_candidates(path):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def model_companion_path(path: Path) -> Path:
+    artifact_spec = describe_artifact_path(path)
+    return (
+        artifact_spec.artifact_directory
+        / f"{artifact_spec.artifact_stem}.model{artifact_spec.extension}"
+    )
+
+
+def related_artifact_paths(path: Path) -> list[Path]:
+    artifact_spec = describe_artifact_path(path)
+    related_paths: list[Path] = []
+
+    if artifact_spec.explicit_type == "model":
+        related_paths.append(path)
+        resume_path = find_existing_resume_companion(path)
+        if resume_path is not None:
+            related_paths.append(resume_path)
+        js_bundle_path = artifact_spec.paired_paths.js_bundle
+        if js_bundle_path.exists():
+            related_paths.append(js_bundle_path)
+        return related_paths
+
+    related_paths.append(path)
+    model_path = model_companion_path(path)
+    if model_path.exists():
+        related_paths.append(model_path)
+    js_bundle_path = artifact_spec.paired_paths.js_bundle
+    if js_bundle_path.exists():
+        related_paths.append(js_bundle_path)
+    return related_paths
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train FoundationGPT on character data.")
+    parser = argparse.ArgumentParser(description="Train PhraseDreamGPT on character data.")
     parser.add_argument(
-        "--input",
+        "--dataset",
         default=None,
+        metavar="PATH",
         help=(
-            "Path to dataset text file (one sample per line). "
-            "When omitted, auto-selects from .txt files in the current directory."
+            "Path to a .txt dataset file. Bare file names resolve inside datasets/. "
+            "When omitted, auto-selects from the datasets/ directory."
         ),
     )
     parser.add_argument("--steps", type=int, default=3000, help="Training steps.")
@@ -433,19 +602,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         const="auto",
         metavar="PATH",
         help=(
-            "Save a resumable checkpoint and an inference model. Omit PATH to save "
-            "both into --models-dir with a timestamped base name."
+            "Save a primary model, resume data, and a JS bundle. Omit PATH "
+            "to save into a clean run folder in models/. If the folder name already exists, "
+            "a numeric suffix is added. Bare names resolve inside models/."
         ),
-    )
-    parser.add_argument(
-        "--datasets-dir",
-        default="datasets",
-        help="Directory to scan for .txt dataset files when --input is omitted.",
-    )
-    parser.add_argument(
-        "--models-dir",
-        default="models",
-        help="Directory used for timestamped saves and --models.",
     )
     parser.add_argument(
         "--compare",
@@ -462,7 +622,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--models",
         action="store_true",
         help=(
-            "Open the interactive model manager for loading, resuming, exporting, "
+            "Open the interactive model manager for loading, resuming, "
             "inspecting, or deleting saved artifacts."
         ),
     )
@@ -508,25 +668,31 @@ def validate_args(args: argparse.Namespace) -> None:
             "Use a small positive value such as 0.8 or 0.5.",
         )
 
-    if args.compare and args.models:
+    artifact_operations = [("--models", args.models)]
+    active_artifact_operations = [name for name, active in artifact_operations if active]
+
+    if len(active_artifact_operations) > 1:
         fail(
-            "--compare cannot be combined with --models.",
-            "Run compare mode by itself, or use --models separately.",
+            "Only one artifact operation can be used at a time.",
+            f"Choose one of: {', '.join(active_artifact_operations)}.",
+        )
+
+    if args.compare and active_artifact_operations:
+        fail(
+            "--compare cannot be combined with artifact management commands.",
+            "Run compare mode by itself, or run the artifact operation separately.",
         )
 
     if args.compare and args.save is not None:
         fail(
             "--compare cannot be combined with --save.",
-            (
-                "Run a normal training command to save a checkpoint, or remove "
-                "--save for compare mode."
-            ),
+            ("Run a normal training command to save a model, or remove --save for compare mode."),
         )
 
-    if args.save is not None and args.models:
+    if args.save is not None and active_artifact_operations:
         fail(
-            "--save cannot be combined with --models.",
-            "Train a model to save it, or use --models to manage existing artifacts.",
+            "--save cannot be combined with artifact management commands.",
+            "Train a model to save it, or run the artifact operation separately.",
         )
 
 
@@ -584,8 +750,8 @@ def load_dataset(path: str) -> Dataset:
     input_path = Path(path)
     if not input_path.exists():
         fail(
-            f"Input file not found: {input_path}",
-            "Pass a valid dataset file with --input PATH.",
+            f"Dataset file not found: {input_path}",
+            "Pass a valid path with --dataset PATH.",
         )
 
     try:
@@ -647,8 +813,11 @@ def list_artifact_files(models_dir: Path) -> list[Path]:
     return sorted(
         (
             path
-            for path in models_dir.iterdir()
-            if path.is_file() and path.suffix in ARTIFACT_EXTENSIONS
+            for path in models_dir.rglob("*")
+            if path.is_file()
+            and path.suffix in ARTIFACT_EXTENSIONS
+            and not any(part.startswith(".") for part in path.relative_to(models_dir).parts)
+            and should_list_artifact_path(path)
         ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
@@ -693,25 +862,47 @@ def describe_artifact_path(path: Path) -> ArtifactSpec:
     )
 
 
-def infer_artifact_type_from_path(path: Path) -> str:
+def should_list_artifact_path(path: Path) -> bool:
     artifact_spec = describe_artifact_path(path)
-    if artifact_spec.explicit_type:
-        return artifact_spec.explicit_type
+    if artifact_spec.explicit_type == "model":
+        return True
+    if artifact_spec.explicit_type == "resume":
+        return not model_companion_path(path).exists()
+    return path.suffix in ARTIFACT_EXTENSIONS
+
+
+def artifact_path_supports_resume(path: Path) -> bool:
+    artifact_spec = describe_artifact_path(path)
+    if artifact_spec.explicit_type == "model":
+        return find_existing_resume_companion(path) is not None
 
     try:
-        artifact = torch.load(path, map_location="cpu", weights_only=False)
-    except Exception:
-        return "unknown"
+        artifact = load_artifact_file(path, torch.device("cpu"))
+    except SystemExit:
+        return False
+    return artifact_supports_exact_resume(artifact)
 
-    if not isinstance(artifact, dict):
+
+def infer_artifact_type_from_path(path: Path) -> str:
+    artifact_spec = describe_artifact_path(path)
+    if artifact_spec.explicit_type == "model":
+        return "resumable" if artifact_path_supports_resume(path) else "model"
+    if artifact_spec.explicit_type == "resume":
+        return "resume"
+
+    try:
+        artifact = load_artifact_file(path, torch.device("cpu"))
+    except SystemExit:
         return "unknown"
+    if artifact_path_supports_resume(path) and describe_artifact_type(artifact) == "model":
+        return "resumable"
     return describe_artifact_type(artifact)
 
 
 def print_available_artifacts(models_dir: Path) -> None:
     artifacts = list_artifact_files(models_dir)
     if not artifacts:
-        print(f"no saved checkpoint or model files found in {models_dir}")
+        print(f"no saved model files found in {models_dir}")
         return
 
     rows = []
@@ -719,7 +910,7 @@ def print_available_artifacts(models_dir: Path) -> None:
         stat = path.stat()
         rows.append(
             (
-                path.name,
+                format_display_path(path, models_dir),
                 infer_artifact_type_from_path(path),
                 datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 format_file_size(stat.st_size),
@@ -741,41 +932,49 @@ def print_available_artifacts(models_dir: Path) -> None:
         )
 
 
-def default_artifact_base_path(models_dir: Path, input_stem: str) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return models_dir / f"{input_stem}_{timestamp}"
+def next_available_artifact_directory(parent_dir: Path, base_name: str) -> Path:
+    candidate = parent_dir / base_name
+    if not candidate.exists():
+        return candidate
+
+    suffix = 2
+    while True:
+        candidate = parent_dir / f"{base_name}_{suffix}"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def default_artifact_directory(models_dir: Path, input_stem: str) -> Path:
+    return next_available_artifact_directory(models_dir, input_stem)
 
 
 def resolve_save_paths(
-    save_model_arg: str | None, models_dir: Path, input_stem: str = "foundationgpt"
+    save_model_arg: str | None, models_dir: Path, input_stem: str = "phrasedreamgpt"
 ) -> ArtifactPaths | None:
     if save_model_arg is None:
         return None
     if save_model_arg == "auto":
-        return describe_artifact_path(
-            default_artifact_base_path(models_dir, input_stem)
-        ).paired_paths
-    return describe_artifact_path(Path(save_model_arg)).save_paths()
+        return build_artifact_paths(default_artifact_directory(models_dir, input_stem), input_stem)
 
+    output_path = resolve_output_path_arg(save_model_arg, models_dir)
+    artifact_spec = describe_artifact_path(output_path)
 
-def resolve_export_output_path(source_path: Path, export_output_arg: str | None) -> Path:
-    if export_output_arg:
-        output_path = describe_artifact_path(Path(export_output_arg)).export_output_path()
-    else:
-        output_path = describe_artifact_path(source_path).companion_model_path()
-    if output_path.resolve() == source_path.resolve():
-        fail(
-            "--export-model cannot overwrite the source checkpoint.",
-            "Use --export-output PATH or let the script create the default `.model.pt` file.",
-        )
-    return output_path
+    if output_path.parent == models_dir:
+        run_dir = next_available_artifact_directory(models_dir, artifact_spec.base_path.name)
+        return build_artifact_paths(run_dir, artifact_spec.base_path.name)
+
+    if artifact_spec.explicit_type is None and not artifact_spec.has_tensor_extension:
+        return build_artifact_paths(output_path, output_path.name)
+
+    return artifact_spec.save_paths()
 
 
 def resolve_resume_save_paths(
     save_model_arg: str | None,
-    source_checkpoint_path: Path,
+    source_artifact_path: Path,
     models_dir: Path,
-    input_stem: str = "foundationgpt",
+    input_stem: str = "phrasedreamgpt",
 ) -> ArtifactPaths:
     if save_model_arg is not None:
         resolved_paths = resolve_save_paths(save_model_arg, models_dir, input_stem)
@@ -783,10 +982,7 @@ def resolve_resume_save_paths(
             fail("Internal error: resume save paths were not resolved.", "Retry the command.")
         return resolved_paths
 
-    return ArtifactPaths(
-        checkpoint=source_checkpoint_path,
-        model=describe_artifact_path(source_checkpoint_path).companion_model_path(),
-    )
+    return describe_artifact_path(source_artifact_path).save_paths()
 
 
 def list_input_files(directory: Path) -> list[Path]:
@@ -795,24 +991,56 @@ def list_input_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.iterdir() if p.is_file() and p.suffix == ".txt")
 
 
-def select_input_file(input_arg: str | None, scan_dir: Path) -> Path:
-    if input_arg is not None:
-        path = Path(input_arg)
+DATASETS_DIR = Path("datasets")
+MODELS_DIR = Path("models")
+
+
+def resolve_existing_path_arg(path_arg: str, default_dir: Path) -> Path:
+    path = Path(path_arg)
+    if path.is_absolute() or path.exists():
+        return path
+    if path.parent == Path("."):
+        return default_dir / path
+    return path
+
+
+def format_display_path(path: Path, root_dir: Path) -> str:
+    try:
+        return str(path.relative_to(root_dir))
+    except ValueError:
+        return str(path)
+
+
+def resolve_output_path_arg(path_arg: str, default_dir: Path) -> Path:
+    path = Path(path_arg)
+    if path.is_absolute():
+        return path
+    if path.parent == Path("."):
+        return default_dir / path
+    return path
+
+
+def select_dataset(dataset_arg: str | None) -> Path:
+    if dataset_arg is not None:
+        path = resolve_existing_path_arg(dataset_arg, DATASETS_DIR)
         if not path.exists():
             fail(
-                f"Input file not found: {path}",
-                "Pass a valid dataset file with --input PATH.",
+                f"Dataset file not found: {path}",
+                (
+                    "Pass a valid path with --dataset PATH. "
+                    "Bare file names are resolved inside datasets/."
+                ),
             )
         return path
 
-    candidates = list_input_files(scan_dir)
+    candidates = list_input_files(DATASETS_DIR)
 
     if not candidates:
         fail(
-            f"No .txt dataset files found in {scan_dir}.",
+            f"No .txt dataset files found in {DATASETS_DIR}.",
             (
-                "Add a .txt file with one sample per line, "
-                "or pass --input PATH to specify a file explicitly."
+                "Add a .txt file with one sample per line to datasets/, "
+                "or pass --dataset PATH to specify a file explicitly."
             ),
         )
 
@@ -822,8 +1050,8 @@ def select_input_file(input_arg: str | None, scan_dir: Path) -> Path:
 
     if not sys.stdin.isatty():
         fail(
-            f"Multiple .txt files found in {scan_dir} but stdin is not a terminal.",
-            "Pass --input PATH to specify a dataset file explicitly.",
+            f"Multiple .txt files found in {DATASETS_DIR} but stdin is not a terminal.",
+            "Pass --dataset PATH to specify a dataset file explicitly.",
         )
 
     print_section("dataset")
@@ -951,7 +1179,10 @@ def restore_rng_state(rng_state: dict) -> None:
         if not torch.cuda.is_available():
             fail(
                 "This checkpoint requires CUDA RNG state restoration, but CUDA is not available.",
-                "Resume on a CUDA-enabled machine or use --load-model for generation only.",
+                (
+                    "Resume on a CUDA-enabled machine or load the model from "
+                    "the interactive models menu for generation only."
+                ),
             )
         torch.cuda.set_rng_state_all([as_cpu_bytetensor(state) for state in cuda_rng_state_all])
 
@@ -965,7 +1196,10 @@ def restore_rng_state(rng_state: dict) -> None:
         ):
             fail(
                 "This checkpoint requires MPS RNG state restoration, but MPS is not available.",
-                "Resume on a machine with MPS support or use --load-model for generation only.",
+                (
+                    "Resume on a machine with MPS support or load the model "
+                    "from the interactive models menu for generation only."
+                ),
             )
         torch.mps.set_rng_state(as_cpu_bytetensor(mps_rng_state))
 
@@ -1072,7 +1306,7 @@ def build_training_checkpoint(
     raw_model = unwrap_model(model)
     return {
         "format_version": 1,
-        "checkpoint_type": "checkpoint",
+        "checkpoint_type": "resume",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "model_config": raw_model.config.to_artifact_dict(),
         "tokenizer": {
@@ -1082,7 +1316,7 @@ def build_training_checkpoint(
         },
         "dataset_data": dataset.data.cpu(),
         "training_config": {
-            "input_path": args.input,
+            "input_path": args.dataset,
             "seed": args.seed,
             "steps": completed_steps,
             "last_run_steps": args.steps,
@@ -1127,19 +1361,38 @@ def build_model_artifact(source_checkpoint: dict, source_path: Path | None = Non
     model_artifact = {
         "format_version": source_checkpoint.get("format_version", 1),
         "checkpoint_type": "model",
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": source_checkpoint.get(
+            "created_at", datetime.now().isoformat(timespec="seconds")
+        ),
         "model_config": source_checkpoint["model_config"],
         "tokenizer": source_checkpoint["tokenizer"],
         "state_dict": source_checkpoint["state_dict"],
     }
     if source_path is not None:
-        model_artifact["source_checkpoint"] = str(source_path)
-    if "created_at" in source_checkpoint:
-        model_artifact["created_at"] = source_checkpoint["created_at"]
+        model_artifact["source_resume"] = str(source_path)
     return model_artifact
 
 
-def save_artifact_pair(
+def build_resume_artifact(source_checkpoint: dict, source_path: Path | None = None) -> dict:
+    resume_artifact = {
+        "format_version": source_checkpoint.get("format_version", 1),
+        "checkpoint_type": "resume",
+        "created_at": source_checkpoint.get(
+            "created_at", datetime.now().isoformat(timespec="seconds")
+        ),
+        "training_config": source_checkpoint["training_config"],
+        "dataset_data": source_checkpoint["dataset_data"],
+        "optimizer_state": source_checkpoint["optimizer_state"],
+        "scaler_state": source_checkpoint.get("scaler_state"),
+        "resume_state": source_checkpoint["resume_state"],
+        "rng_state": source_checkpoint["rng_state"],
+    }
+    if source_path is not None:
+        resume_artifact["source_model"] = str(source_path)
+    return resume_artifact
+
+
+def save_artifact_set(
     model: nn.Module,
     optimizer_state: dict,
     scaler_state: dict | None,
@@ -1162,25 +1415,31 @@ def save_artifact_pair(
         total_tokens,
         final_loss,
     )
-    save_artifact_file(checkpoint, artifact_paths.checkpoint)
-    save_artifact_file(
-        build_model_artifact(checkpoint, source_path=artifact_paths.checkpoint),
-        artifact_paths.model,
-    )
-    return artifact_paths
+    ensure_artifact_directory_safe(artifact_paths)
+    staging_dir = create_staging_directory(artifact_paths.directory)
+    staged_paths = build_staged_artifact_paths(artifact_paths, staging_dir)
 
-
-def export_model_artifact(source_path: Path, output_path: Path) -> Path:
-    artifact = load_artifact_file(source_path, torch.device("cpu"))
-    if not artifact_supports_exact_resume(artifact):
-        fail(
-            (
-                "Checkpoint is already model-only or does not include removable "
-                f"resume state: {source_path}"
-            ),
-            "Use it directly with --load-model instead of exporting it again.",
+    try:
+        save_artifact_file(
+            build_model_artifact(checkpoint, source_path=artifact_paths.resume),
+            staged_paths.model,
         )
-    return save_artifact_file(build_model_artifact(artifact, source_path=source_path), output_path)
+        save_artifact_file(
+            build_resume_artifact(checkpoint, source_path=artifact_paths.model),
+            staged_paths.resume,
+        )
+        export_js_model_bundle(
+            staged_paths.model,
+            staged_paths.js_bundle,
+            source_artifact_path=artifact_paths.model,
+        )
+    except BaseException:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    commit_staged_directory(staging_dir, artifact_paths.directory)
+    return artifact_paths
 
 
 def require_artifact_mapping(
@@ -1214,6 +1473,111 @@ def require_artifact_keys(
         )
 
 
+def load_raw_artifact_file(artifact_path: Path, device: torch.device) -> dict:
+    if not artifact_path.exists():
+        fail(
+            f"Artifact file not found: {artifact_path}",
+            (
+                "Pass an existing saved artifact path from models/, or use the "
+                "interactive models menu to browse saved files."
+            ),
+        )
+
+    try:
+        artifact = torch.load(artifact_path, map_location=device, weights_only=False)
+    except Exception as exc:
+        fail(
+            f"Failed to load artifact file: {artifact_path}",
+            f"Make sure the file is a valid artifact created by this script. Original error: {exc}",
+        )
+
+    return require_artifact_mapping(
+        artifact,
+        label="Artifact file",
+        hint=ARTIFACT_SCHEMA_HINT,
+        artifact_path=artifact_path,
+    )
+
+
+def validate_model_artifact(
+    artifact: dict, *, artifact_path: Path | None = None, hint: str = ARTIFACT_SCHEMA_HINT
+) -> None:
+    require_artifact_keys(
+        artifact,
+        MODEL_ARTIFACT_KEYS,
+        label="Artifact file",
+        hint=hint,
+        artifact_path=artifact_path,
+    )
+    parse_artifact_model_config(artifact, artifact_path=artifact_path)
+    require_artifact_keys(
+        require_artifact_mapping(
+            artifact["tokenizer"],
+            label="Artifact tokenizer",
+            hint=hint,
+            artifact_path=artifact_path,
+        ),
+        TOKENIZER_KEYS,
+        label="Artifact tokenizer",
+        hint=hint,
+        artifact_path=artifact_path,
+    )
+    require_artifact_mapping(
+        artifact["state_dict"],
+        label="Artifact state_dict",
+        hint=hint,
+        artifact_path=artifact_path,
+    )
+
+
+def validate_resume_artifact(
+    artifact: dict, *, artifact_path: Path | None = None, hint: str = RESUME_ARTIFACT_HINT
+) -> None:
+    require_artifact_keys(
+        artifact,
+        RESUME_ARTIFACT_KEYS,
+        label="Resume data",
+        hint=hint,
+        artifact_path=artifact_path,
+    )
+    require_artifact_mapping(
+        artifact.get("resume_state"),
+        label="Resume state",
+        hint=hint,
+        artifact_path=artifact_path,
+    )
+    resolve_resume_training_config(artifact, artifact_path or Path("<resume>"))
+
+
+def merge_model_and_resume_artifacts(
+    model_artifact: dict,
+    resume_artifact: dict,
+    *,
+    model_path: Path | None = None,
+    resume_path: Path | None = None,
+) -> dict:
+    validate_model_artifact(model_artifact, artifact_path=model_path)
+    validate_resume_artifact(resume_artifact, artifact_path=resume_path)
+    merged_artifact = dict(model_artifact)
+    for key in (
+        "training_config",
+        "dataset_data",
+        "optimizer_state",
+        "scaler_state",
+        "resume_state",
+        "rng_state",
+    ):
+        if key in resume_artifact:
+            merged_artifact[key] = resume_artifact[key]
+    if merged_artifact.get("created_at") is None and resume_artifact.get("created_at") is not None:
+        merged_artifact["created_at"] = resume_artifact["created_at"]
+    if resume_artifact.get("source_model"):
+        merged_artifact["source_model"] = resume_artifact["source_model"]
+    if resume_path is not None:
+        merged_artifact["resume_data_path"] = str(resume_path)
+    return merged_artifact
+
+
 def parse_artifact_model_config(
     artifact: dict, *, artifact_path: Path | None = None
 ) -> ModelConfig:
@@ -1237,53 +1601,67 @@ def parse_artifact_model_config(
 
 
 def load_artifact_file(artifact_path: Path, device: torch.device) -> dict:
-    if not artifact_path.exists():
-        fail(
-            f"Checkpoint/model file not found: {artifact_path}",
-            "Pass an existing path to --load-model, or use --list-models to see saved files.",
+    artifact = load_raw_artifact_file(artifact_path, device)
+    artifact_type = ARTIFACT_TYPE_ALIASES.get(artifact.get("checkpoint_type"))
+
+    has_model_payload = MODEL_ARTIFACT_KEYS.issubset(artifact)
+    has_resume_payload = RESUME_ARTIFACT_KEYS.issubset(artifact)
+
+    if artifact_type == "resume" and not has_model_payload:
+        model_path = model_companion_path(artifact_path)
+        model_artifact = load_raw_artifact_file(model_path, device)
+        return merge_model_and_resume_artifacts(
+            model_artifact,
+            artifact,
+            model_path=model_path,
+            resume_path=artifact_path,
         )
 
-    try:
-        artifact = torch.load(artifact_path, map_location=device, weights_only=False)
-    except Exception as exc:
-        fail(
-            f"Failed to load checkpoint/model file: {artifact_path}",
-            f"Make sure the file is a valid artifact created by this script. Original error: {exc}",
+    if has_model_payload and has_resume_payload:
+        validate_model_artifact(artifact, artifact_path=artifact_path)
+        validate_resume_artifact(artifact, artifact_path=artifact_path)
+        return artifact
+
+    if has_model_payload:
+        validate_model_artifact(artifact, artifact_path=artifact_path)
+        resume_path = find_existing_resume_companion(artifact_path)
+        if resume_path is None or resume_path.resolve() == artifact_path.resolve():
+            return artifact
+        try:
+            resume_artifact = load_raw_artifact_file(resume_path, device)
+            if MODEL_ARTIFACT_KEYS.issubset(resume_artifact) and RESUME_ARTIFACT_KEYS.issubset(
+                resume_artifact
+            ):
+                validate_resume_artifact(resume_artifact, artifact_path=resume_path)
+                return merge_model_and_resume_artifacts(
+                    artifact,
+                    resume_artifact,
+                    model_path=artifact_path,
+                    resume_path=resume_path,
+                )
+            return merge_model_and_resume_artifacts(
+                artifact,
+                resume_artifact,
+                model_path=artifact_path,
+                resume_path=resume_path,
+            )
+        except SystemExit:
+            return artifact
+
+    if has_resume_payload:
+        model_path = model_companion_path(artifact_path)
+        model_artifact = load_raw_artifact_file(model_path, device)
+        return merge_model_and_resume_artifacts(
+            model_artifact,
+            artifact,
+            model_path=model_path,
+            resume_path=artifact_path,
         )
 
-    artifact = require_artifact_mapping(
-        artifact,
-        label="Checkpoint/model file",
-        hint=ARTIFACT_SCHEMA_HINT,
-        artifact_path=artifact_path,
+    fail(
+        f"Artifact file is missing required model fields: {artifact_path}",
+        ARTIFACT_SCHEMA_HINT,
     )
-    require_artifact_keys(
-        artifact,
-        MODEL_ARTIFACT_KEYS,
-        label="Checkpoint/model file",
-        hint=ARTIFACT_SCHEMA_HINT,
-        artifact_path=artifact_path,
-    )
-    parse_artifact_model_config(artifact, artifact_path=artifact_path)
-    require_artifact_keys(
-        require_artifact_mapping(
-            artifact["tokenizer"],
-            label="Artifact tokenizer",
-            hint=ARTIFACT_SCHEMA_HINT,
-            artifact_path=artifact_path,
-        ),
-        TOKENIZER_KEYS,
-        label="Artifact tokenizer",
-        hint=ARTIFACT_SCHEMA_HINT,
-        artifact_path=artifact_path,
-    )
-    require_artifact_mapping(
-        artifact["state_dict"],
-        label="Artifact state_dict",
-        hint=ARTIFACT_SCHEMA_HINT,
-        artifact_path=artifact_path,
-    )
-    return artifact
 
 
 def artifact_supports_exact_resume(artifact: dict) -> bool:
@@ -1295,7 +1673,7 @@ def describe_artifact_type(artifact: dict) -> str:
     if checkpoint_type is not None:
         return checkpoint_type
     if artifact_supports_exact_resume(artifact):
-        return "checkpoint"
+        return "resume"
     if MODEL_ARTIFACT_KEYS.issubset(artifact):
         return "model"
     return "unknown"
@@ -1322,7 +1700,7 @@ def require_exact_resume_artifact(artifact: dict, artifact_path: Path) -> None:
     require_artifact_keys(
         artifact,
         EXACT_RESUME_ARTIFACT_KEYS,
-        label="Checkpoint",
+        label="Resume data",
         hint=RESUME_ARTIFACT_HINT,
         artifact_path=artifact_path,
     )
@@ -1360,6 +1738,77 @@ def build_model_from_artifact(artifact: dict, device: torch.device) -> GPT:
         )
 
     return model
+
+
+def build_js_bundle_bytes(
+    *, onnx_bytes: bytes, tokenizer: dict[str, object], source_path: Path
+) -> bytes:
+    header = {
+        "format": JS_BUNDLE_FORMAT,
+        "version": JS_BUNDLE_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "source_artifact": str(source_path),
+        "tokenizer": tokenizer,
+    }
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    return JS_BUNDLE_MAGIC + struct.pack("<I", len(header_bytes)) + header_bytes + onnx_bytes
+
+
+def export_js_model_bundle(
+    source_path: Path, output_path: Path, *, source_artifact_path: Path | None = None
+) -> Path:
+    ensure_utf8_stdio()
+    artifact = load_artifact_file(source_path, torch.device("cpu"))
+    model = build_model_from_artifact(artifact, torch.device("cpu"))
+    model.eval()
+
+    seq_len = torch.export.Dim(
+        "seq_len",
+        min=1,
+        max=parse_artifact_model_config(artifact, artifact_path=source_path).block_size,
+    )
+    dummy = torch.zeros(1, 1, dtype=torch.long)
+
+    with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as handle:
+        temp_onnx_path = Path(handle.name)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`isinstance\(treespec, LeafSpec\)` is deprecated",
+                category=FutureWarning,
+            )
+            torch.onnx.export(
+                model,
+                dummy,
+                str(temp_onnx_path),
+                input_names=["idx"],
+                output_names=["logits"],
+                external_data=False,
+                dynamic_shapes={"idx": {1: seq_len}},
+                opset_version=18,
+            )
+
+        tokenizer = artifact["tokenizer"]
+        bundle_bytes = build_js_bundle_bytes(
+            onnx_bytes=temp_onnx_path.read_bytes(),
+            tokenizer={
+                "id_to_char": list(tokenizer["id_to_char"]),
+                "bos_id": int(tokenizer["bos_id"]),
+                "vocab_size": int(tokenizer["vocab_size"]),
+                "block_size": parse_artifact_model_config(
+                    artifact, artifact_path=source_path
+                ).block_size,
+            },
+            source_path=source_artifact_path or source_path,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(bundle_bytes)
+    finally:
+        temp_onnx_path.unlink(missing_ok=True)
+
+    return output_path
 
 
 def resolve_resume_args(
@@ -1406,7 +1855,8 @@ def verify_resume_runtime(artifact: dict, runtime: RuntimeSettings) -> None:
                 "when the checkpoint was created."
             ),
             (
-                f"Resume on {expected_device} or use --load-model for generation "
+                f"Resume on {expected_device} or load the artifact from the "
+                "models menu for generation "
                 f"only. Current device resolved to {runtime.resolved_device}."
             ),
         )
@@ -1455,74 +1905,122 @@ def print_artifact_details(artifact_path: Path) -> None:
     tokenizer = artifact["tokenizer"]
     training_config = artifact.get("training_config", {})
     resume_state = artifact.get("resume_state", {})
+    param_count = sum(t.numel() for t in artifact["state_dict"].values())
 
-    print("--- artifact details ---")
-    print(f"path: {artifact_path}")
-    print(f"size: {format_file_size(stat.st_size)}")
-    print(f"modified: {datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"created_at: {artifact.get('created_at', 'not recorded')}")
-    print(f"format_version: {artifact.get('format_version', 'not recorded')}")
-    print(f"artifact_type: {describe_artifact_type(artifact)}")
-    if artifact.get("source_checkpoint"):
-        print(f"source_checkpoint: {artifact['source_checkpoint']}")
-    print(
-        "model: "
-        f"vocab_size={model_config.vocab_size}, "
-        f"block_size={model_config.block_size}, "
-        f"n_layer={model_config.n_layer}, "
-        f"n_embd={model_config.n_embd}, "
-        f"n_head={model_config.n_head}, "
-        f"mlp_type={model_config.mlp_type}, "
-        f"mlp_hidden_dim={model_config.mlp_hidden_dim}"
-    )
-    print(
-        "tokenizer: "
-        f"vocab_size={tokenizer['vocab_size']}, "
-        f"bos_id={tokenizer['bos_id']}, "
-        f"characters={len(tokenizer['id_to_char'])}"
-    )
+    def row(label: str, value: object, w: int) -> None:
+        print(f"{label:{w}}  {value}")
+
+    # File
+    print_section("inspect")
+    w = len("modified")
+    row("path", artifact_path, w)
+    row("size", format_file_size(stat.st_size), w)
+    row("modified", datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"), w)
+    if artifact.get("created_at"):
+        row("created", artifact["created_at"], w)
+    if artifact.get("exported_at"):
+        row("exported", artifact["exported_at"], w)
+    row("type", describe_artifact_type(artifact), w)
+    row("version", artifact.get("format_version", "unknown"), w)
+    if artifact.get("source_resume") and Path(str(artifact["source_resume"])).exists():
+        row("source", artifact["source_resume"], w)
+    if artifact.get("resume_data_path"):
+        row("resume data", artifact["resume_data_path"], w)
+
+    # Model
+    print_section("model")
+    w = len("mlp hidden")
+    row("params", f"{param_count:,}", w)
+    row("vocab", model_config.vocab_size, w)
+    row("block", model_config.block_size, w)
+    row("layers", model_config.n_layer, w)
+    row("embd", model_config.n_embd, w)
+    row("heads", model_config.n_head, w)
+    row("mlp type", model_config.mlp_type, w)
+    row("mlp hidden", model_config.mlp_hidden_dim, w)
+
+    # Tokenizer
+    print_section("tokenizer")
+    w = len("bos id")
+    row("vocab", f"{tokenizer['vocab_size']} chars", w)
+    row("bos id", tokenizer["bos_id"], w)
+
+    # Training
     if training_config:
+        print_section("training")
+        w = len("weight decay")
         if training_config.get("input_path"):
-            print(f"input_path: {training_config['input_path']}")
-        print(
-            "training: "
-            f"steps={training_config.get('steps', 'unknown')}, "
-            "last_run_steps="
-            f"{training_config.get('last_run_steps', training_config.get('steps', 'unknown'))}, "
-            f"batch_size={training_config.get('batch_size', 'unknown')}, "
-            f"learning_rate={training_config.get('learning_rate', 'unknown')}, "
-            f"seed={training_config.get('seed', 'unknown')}"
+            row("dataset", training_config["input_path"], w)
+        total = training_config.get("steps")
+        last = training_config.get("last_run_steps", total)
+        steps_str = (
+            f"{total:,} total  ({last:,} last run)"
+            if isinstance(total, int) and isinstance(last, int)
+            else f"{total}  ({last} last run)"
         )
-        print(
-            "requested: "
-            "device="
-            f"{training_config.get('requested_device', training_config.get('device', 'unknown'))}, "
-            "dtype="
-            f"{training_config.get('requested_dtype', training_config.get('dtype', 'unknown'))}, "
-            f"amp={training_config.get('amp_requested', training_config.get('amp', 'unknown'))}, "
-            "compile="
-            f"{training_config.get('compile_requested', training_config.get('compile', 'unknown'))}"
+        row("steps", steps_str, w)
+        row("seed", training_config.get("seed", "unknown"), w)
+        row("batch", training_config.get("batch_size", "unknown"), w)
+        row("lr", training_config.get("learning_rate", "unknown"), w)
+        row("beta1", training_config.get("beta1", "unknown"), w)
+        row("beta2", training_config.get("beta2", "unknown"), w)
+        row("eps", training_config.get("eps", "unknown"), w)
+        row("weight decay", training_config.get("weight_decay", "unknown"), w)
+        dataset_data = artifact.get("dataset_data")
+        if dataset_data is not None and hasattr(dataset_data, "numel"):
+            row("stored tokens", f"{dataset_data.numel():,}", w)
+
+        # Runtime
+        print_section("runtime")
+        w = len("compile")
+        req_device = training_config.get(
+            "requested_device", training_config.get("device", "unknown")
         )
-        if any(
-            key in training_config
-            for key in ("resolved_device", "amp_enabled", "amp_dtype", "compile_enabled")
-        ):
-            print(
-                "effective: "
-                f"device={training_config.get('resolved_device', 'unknown')}, "
-                f"amp_enabled={training_config.get('amp_enabled', 'unknown')}, "
-                f"amp_dtype={training_config.get('amp_dtype', 'none')}, "
-                f"compile_enabled={training_config.get('compile_enabled', 'unknown')}"
-            )
+        eff_device = training_config.get("resolved_device")
+        if eff_device is None or eff_device == req_device:
+            device_str = eff_device or req_device
+        else:
+            device_str = f"{eff_device}  ({req_device})"
+        row("device", device_str, w)
+
+        req_amp = training_config.get("amp_requested", training_config.get("amp", "unknown"))
+        amp_enabled = training_config.get("amp_enabled")
+        amp_dtype = training_config.get("amp_dtype")
+        if amp_enabled is not None:
+            amp_str = "on" if amp_enabled else "off"
+            if amp_dtype:
+                amp_str += f"  {amp_dtype}"
+            amp_str += f"  (requested {req_amp})"
+        else:
+            amp_str = str(req_amp)
+        row("amp", amp_str, w)
+
+        req_compile = training_config.get(
+            "compile_requested", training_config.get("compile", "unknown")
+        )
+        compile_enabled = training_config.get("compile_enabled")
+        if compile_enabled is not None:
+            compile_str = f"{'on' if compile_enabled else 'off'}  (requested {req_compile})"
+        else:
+            compile_str = str(req_compile)
+        row("compile", compile_str, w)
+
+    # Resume state
     if resume_state:
-        print(
-            "resume: "
-            f"completed_steps={resume_state.get('completed_steps', 'unknown')}, "
-            f"total_tokens={resume_state.get('total_tokens', 'unknown')}, "
-            f"final_loss={resume_state.get('final_loss', 'unknown')}"
-        )
-    print(f"exact_resume_supported: {artifact_supports_exact_resume(artifact)}")
-    print(f"state_dict tensors: {len(artifact['state_dict'])}")
+        print_section("resume")
+        w = len("final loss")
+        completed = resume_state.get("completed_steps")
+        row("completed", f"{completed:,} steps" if isinstance(completed, int) else "unknown", w)
+        tokens = resume_state.get("total_tokens")
+        row("tokens", f"{tokens:,}" if isinstance(tokens, int) else "unknown", w)
+        final_loss = resume_state.get("final_loss")
+        row("final loss", f"{final_loss:.4f}" if isinstance(final_loss, float) else "unknown", w)
+
+    # Summary
+    print_section("artifact")
+    w = len("resumable")
+    row("resumable", "yes" if artifact_supports_exact_resume(artifact) else "no", w)
+    row("tensors", len(artifact["state_dict"]), w)
 
 
 class BatchProvider:
@@ -1919,7 +2417,7 @@ def save_training_result_artifacts(
     args: argparse.Namespace,
     artifact_paths: ArtifactPaths,
 ) -> ArtifactPaths:
-    return save_artifact_pair(
+    return save_artifact_set(
         result.model,
         result.optimizer_state,
         result.scaler_state,
@@ -1935,10 +2433,13 @@ def save_training_result_artifacts(
 
 def print_saved_artifact_paths(artifact_paths: ArtifactPaths, *, updated: bool) -> None:
     print_section("updated" if updated else "saved")
-    cp_size = format_file_size(artifact_paths.checkpoint.stat().st_size)
+    js_size = format_file_size(artifact_paths.js_bundle.stat().st_size)
+    resume_size = format_file_size(artifact_paths.resume.stat().st_size)
     m_size = format_file_size(artifact_paths.model.stat().st_size)
-    print(f"checkpoint  {artifact_paths.checkpoint}  ({cp_size})")
+    print(f"directory   {artifact_paths.directory}")
     print(f"model       {artifact_paths.model}  ({m_size})")
+    print(f"resume data {artifact_paths.resume}  ({resume_size})")
+    print(f"js bundle   {artifact_paths.js_bundle}  ({js_size})")
 
 
 def run_generation(
@@ -2017,12 +2518,12 @@ def run_artifact_inference_for_path(
 
 
 def run_resume_training_for_path(
-    user_args: argparse.Namespace, device: torch.device, checkpoint_path: Path, models_dir: Path
+    user_args: argparse.Namespace, device: torch.device, artifact_path: Path, models_dir: Path
 ) -> None:
-    artifact = load_artifact_file(checkpoint_path, device)
-    require_exact_resume_artifact(artifact, checkpoint_path)
+    artifact = load_artifact_file(artifact_path, device)
+    require_exact_resume_artifact(artifact, artifact_path)
 
-    resumed_args = resolve_resume_args(user_args, artifact, checkpoint_path)
+    resumed_args = resolve_resume_args(user_args, artifact, artifact_path)
     dataset = dataset_from_artifact(artifact)
     ensure_dataset_supports_block_size(dataset, resumed_args.block_size)
 
@@ -2031,7 +2532,7 @@ def run_resume_training_for_path(
     input_stem = (
         Path(original_input).stem
         if original_input
-        else describe_artifact_path(checkpoint_path).base_path.name
+        else describe_artifact_path(artifact_path).base_path.name
     )
 
     result = train_once(
@@ -2048,35 +2549,33 @@ def run_resume_training_for_path(
         result,
         dataset,
         resumed_args,
-        resolve_resume_save_paths(user_args.save, checkpoint_path, models_dir, input_stem),
+        resolve_resume_save_paths(user_args.save, artifact_path, models_dir, input_stem),
     )
     print_saved_artifact_paths(saved_paths, updated=user_args.save is None)
     maybe_run_generation(user_args, result.model, dataset, device)
 
 
-def run_export_model_for_path(checkpoint_path: Path, export_output_arg: str | None) -> None:
-    output_path = resolve_export_output_path(checkpoint_path, export_output_arg)
-    saved_path = export_model_artifact(checkpoint_path, output_path)
-    source_size = checkpoint_path.stat().st_size
-    saved_size = saved_path.stat().st_size
-    reduction = 100.0 * (1.0 - (saved_size / max(source_size, 1)))
-    print(f"source checkpoint: {checkpoint_path}")
-    print(f"saved model: {saved_path}")
-    print(
-        f"size reduction: {format_file_size(source_size)} -> {format_file_size(saved_size)} "
-        f"({reduction:.1f}% smaller)"
-    )
-
-
 def delete_artifact_file(artifact_path: Path) -> None:
-    try:
-        artifact_path.unlink()
-    except OSError as exc:
-        fail(
-            f"Failed to delete artifact: {artifact_path}",
-            f"Close any program using the file and try again. Original error: {exc}",
-        )
-    print(f"deleted artifact: {artifact_path}")
+    deleted_paths: list[Path] = []
+    for path in related_artifact_paths(artifact_path):
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            fail(
+                f"Failed to delete artifact: {path}",
+                f"Close any program using the file and try again. Original error: {exc}",
+            )
+        deleted_paths.append(path)
+
+    if not deleted_paths:
+        print(f"artifact already deleted: {artifact_path}")
+        return
+
+    print("deleted artifacts:")
+    for path in deleted_paths:
+        print(f"  {path}")
 
 
 def prompt_train_settings(args: argparse.Namespace) -> argparse.Namespace:
@@ -2150,14 +2649,6 @@ def prompt_load_settings(args: argparse.Namespace) -> argparse.Namespace:
     return new_args
 
 
-def prompt_export_settings() -> str | None:
-    print_section("export settings")
-    label_w = len("output path")
-    sentinel = "default .model.pt"
-    path = prompt_with_default(f"{'output path':{label_w}}", sentinel)
-    return None if path == sentinel else path
-
-
 def prompt_benchmark_settings(args: argparse.Namespace) -> argparse.Namespace:
     print_section("benchmark settings")
     new_args = argparse.Namespace(**vars(args))
@@ -2168,7 +2659,7 @@ def prompt_benchmark_settings(args: argparse.Namespace) -> argparse.Namespace:
 
 def main_menu(args: argparse.Namespace, models_dir: Path) -> None:
     while True:
-        print_section("foundationgpt")
+        print_section("phrasedreamgpt")
         print()
         print("1  train")
         print("2  models")
@@ -2181,11 +2672,10 @@ def main_menu(args: argparse.Namespace, models_dir: Path) -> None:
             return
 
         if choice in {"1", "t", "train"}:
-            datasets_dir = Path(args.datasets_dir)
-            input_path = select_input_file(args.input, datasets_dir)
+            input_path = select_dataset(args.dataset)
             train_args = argparse.Namespace(**vars(args))
-            train_args.input = str(input_path)
-            dataset = load_dataset(train_args.input)
+            train_args.dataset = str(input_path)
+            dataset = load_dataset(train_args.dataset)
             train_args = prompt_train_settings(train_args)
             seed_everything(train_args.seed)
             device = resolve_device(train_args.device)
@@ -2202,11 +2692,10 @@ def main_menu(args: argparse.Namespace, models_dir: Path) -> None:
                 print("benchmark requires an accelerator (CUDA or MPS) — none detected")
                 continue
             accel_device, accel_label = detected
-            datasets_dir = Path(args.datasets_dir)
-            input_path = select_input_file(args.input, datasets_dir)
+            input_path = select_dataset(args.dataset)
             bench_args = argparse.Namespace(**vars(args))
-            bench_args.input = str(input_path)
-            dataset = load_dataset(bench_args.input)
+            bench_args.dataset = str(input_path)
+            dataset = load_dataset(bench_args.dataset)
             print_section("benchmark")
             label_w = len("accelerator")
             print(f"{'accelerator':{label_w}}  {accel_label}")
@@ -2227,7 +2716,7 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
     while True:
         artifacts = list_artifact_files(models_dir)
         if not artifacts:
-            print(f"no saved checkpoint or model files found in {models_dir}")
+            print(f"no saved model files found in {models_dir}")
             return
 
         print_available_artifacts(models_dir)
@@ -2244,15 +2733,14 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
             continue
 
         artifact_path = artifacts[index - 1]
-        is_checkpoint = infer_artifact_type_from_path(artifact_path) == "checkpoint"
+        is_resumable = artifact_path_supports_resume(artifact_path)
+        display_path = format_display_path(artifact_path, models_dir)
 
         while True:
-            print(f"selected: {artifact_path.name}")
-            if is_checkpoint:
-                action_prompt = (
-                    "[L]oad, [R]esume, [E]xport, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
-                )
-                invalid_msg = "enter L, R, E, I, D, B, or Q"
+            print(f"selected: {display_path}")
+            if is_resumable:
+                action_prompt = "[L]oad, [R]esume, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
+                invalid_msg = "enter L, R, I, D, B, or Q"
             else:
                 action_prompt = "[L]oad, [I]nspect, [D]elete, [B]ack, or [Q]uit: "
                 invalid_msg = "enter L, I, D, B, or Q"
@@ -2266,13 +2754,13 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
                 run_artifact_inference_for_path(load_args, device, artifact_path)
                 return
 
-            if action in {"r", "resume"} and is_checkpoint:
+            if action in {"r", "resume"} and is_resumable:
                 preview = load_artifact_file(artifact_path, torch.device("cpu"))
                 require_exact_resume_artifact(preview, artifact_path)
                 training_config = preview.get("training_config", {})
                 resume_state = preview.get("resume_state", {})
                 print_section("resume")
-                print(f"checkpoint  {artifact_path.name}")
+                print(f"artifact    {display_path}")
                 if training_config.get("input_path"):
                     print(f"dataset     {training_config['input_path']}")
                 if "completed_steps" in resume_state:
@@ -2280,11 +2768,6 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
                 resume_args = prompt_resume_settings(args)
                 device = resolve_device(resume_args.device)
                 run_resume_training_for_path(resume_args, device, artifact_path, models_dir)
-                return
-
-            if action in {"e", "export"} and is_checkpoint:
-                export_output = prompt_export_settings()
-                run_export_model_for_path(artifact_path, export_output)
                 return
 
             if action in {"i", "inspect", "view"}:
@@ -2318,10 +2801,10 @@ def run_training(
     dataset: Dataset | None = None,
 ) -> None:
     if dataset is None:
-        dataset = load_dataset(args.input)
+        dataset = load_dataset(args.dataset)
     ensure_dataset_supports_block_size(dataset, args.block_size)
 
-    input_stem = Path(args.input).stem
+    input_stem = Path(args.dataset).stem
 
     if args.compare:
         run_compare(args, dataset)
@@ -2338,22 +2821,28 @@ def run_training(
     maybe_run_generation(args, result.model, dataset, device)
 
 
-def main() -> None:
-    args = parse_args()
-    models_dir = Path(args.models_dir)
-
+def run_requested_artifact_operation(args: argparse.Namespace, models_dir: Path) -> bool:
     if args.models:
         interactive_artifact_manager(args, models_dir)
+        return True
+
+    return False
+
+
+def main() -> None:
+    args = parse_args()
+
+    if run_requested_artifact_operation(args, MODELS_DIR):
         return
 
     if len(sys.argv) == 1:
-        main_menu(args, models_dir)
+        main_menu(args, MODELS_DIR)
         return
 
     seed_everything(args.seed)
-    args.input = str(select_input_file(args.input, Path(args.datasets_dir)))
+    args.dataset = str(select_dataset(args.dataset))
     device = torch.device("cpu") if args.compare else resolve_device(args.device)
-    run_training(args, device, models_dir)
+    run_training(args, device, MODELS_DIR)
 
 
 if __name__ == "__main__":

@@ -5,9 +5,15 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Models and artifacts
 models/
+
+# Node
+node_modules/
 
 # Pre-commit cache
 .pre-commit-cache/

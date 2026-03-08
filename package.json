@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "run-js": "node run_js_bundle.js"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.24.3"
+  }
+}

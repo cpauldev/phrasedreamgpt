@@ -1,12 +1,13 @@
-# FoundationGPT
+# PhraseDreamGPT
 
-`FoundationGPT` is a single-file **character-level language model** built on a **GPT architecture** — a trainer and inference script for local text datasets. It supports CPU, CUDA, and MPS execution, with an interactive main menu, artifact-based save/load/export/resume, and device benchmarking.
+`PhraseDreamGPT` is a **Character-Level Language Model (CLM)** built on a **GPT architecture** — a trainer and inference script for local text datasets. It supports CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, with an interactive main menu, artifact-based save/load/resume, automatic JS bundle output, and device benchmarking.
 
-Primary script: `foundationgpt.py`
+Primary script: `phrasedreamgpt.py`
 
 ## Table of Contents
 
 - [What it provides](#what-it-provides)
+- [Use cases](#use-cases)
 - [Architecture](#architecture)
 - [Optimization](#optimization)
 - [Requirements](#requirements)
@@ -15,6 +16,7 @@ Primary script: `foundationgpt.py`
 - [Using your own dataset](#using-your-own-dataset)
 - [Interactive menu](#interactive-menu)
 - [Saving and artifacts](#saving-and-artifacts)
+- [JavaScript runtime](#javascript-runtime)
 - [Artifact manager](#artifact-manager)
 - [CLI scripting mode](#cli-scripting-mode)
 - [Runtime behavior](#runtime-behavior)
@@ -26,16 +28,28 @@ Primary script: `foundationgpt.py`
 - Character-level GPT training from a local newline-delimited text file
 - Transformer blocks with RMSNorm and SwiGLU feed-forward layers
 - Inference from saved artifacts without retraining
-- Exact resume from checkpoint artifacts
-- Export of smaller model-only inference artifacts
+- Exact resume from saved models that still have their resume data
+- Automatic creation of Python and JS inference artifacts on save/resume
 - CPU, CUDA, and MPS execution modes
 - Optional CUDA AMP and `torch.compile`
 - CPU vs accelerator benchmarking (auto-detects CUDA or MPS)
-- Interactive artifact manager for loading, resuming, exporting, inspecting, and deleting artifacts
+- Interactive artifact manager for loading, resuming, inspecting, and deleting artifacts
+
+## Use cases
+
+Train on any newline-delimited text file. The model learns the underlying character patterns — rhythm, structure, common sequences — and generates new outputs that fit the same style without directly copying from the training data. Unlike a static list, it generalises, so every output is novel and generation is effectively unlimited.
+
+Example applications:
+
+- **Procedural content** — place names, species names, fictional languages, or any structured short-form text
+- **Baby names** — train on cultural or regional name lists to generate names with a specific style or origin
+- **Brand and product names** — derive name candidates that fit the phonetic profile of an existing brand portfolio
+- **Username generation** — produce handles that conform to a learned stylistic convention
+- **Medical or scientific terminology** — learn from domain-specific vocabulary to generate plausible new compound terms
 
 ## Architecture
 
-`FoundationGPT` is a decoder-only GPT and character language model — a transformer that operates at the character level rather than the word or subword token level.
+`PhraseDreamGPT` is a decoder-only GPT and character language model — a transformer that operates at the character level rather than the word or subword token level.
 
 It uses:
 
@@ -126,29 +140,29 @@ The repository ships with `datasets/halluciname.txt` — a list of **32,033 huma
 
 Running the default training configuration on this dataset produces a model that generates **novel plausible-sounding names** — strings that follow the character-level patterns of real names without repeating them verbatim. At 3,000 steps with default settings the model reliably produces coherent name-like outputs. With more steps or a larger architecture the outputs become more varied and better calibrated to the distribution of the training names.
 
-This makes it a good first dataset for verifying the full pipeline: training, generation, saving, resuming, and exporting all work against a small, fast-converging target.
+This makes it a good first dataset for verifying the full pipeline: training, generation, saving, resuming, and the JS runtime all work against a small, fast-converging target.
 
 ## Using your own dataset
 
 - Place `.txt` files in the `datasets/` directory, one sample per line, no empty lines needed between entries
 - The script strips empty lines automatically
-- When `--input` is omitted, the script auto-selects if one file is present, or shows a numbered list when multiple are found
-- Pass a specific file with `--input PATH` to bypass selection entirely
-- Change the scan directory with `--datasets-dir PATH` (default: `datasets`)
+- When `--dataset` is omitted, the script auto-selects if one file is present in `datasets/`, or shows a numbered list when multiple are found
+- Pass a specific file with `--dataset PATH` to bypass auto-selection entirely
+- Bare dataset names such as `--dataset halluciname.txt` resolve inside `datasets/`
 - The dataset is shuffled before tokenization, and a character vocabulary is built from all characters present
 - The token stream must contain at least `block_size + 2` tokens after tokenization
-- The dataset file name stem is used as the base name for timestamped saved artifacts
+- The dataset file name stem is used as the base name for saved run folders
 
 ## Interactive menu
 
 Running the script with no arguments opens the main menu:
 
 ```
-python foundationgpt.py
+python phrasedreamgpt.py
 ```
 
 ```
---- foundationgpt ---
+--- phrasedreamgpt ---
 
 1  train
 2  models
@@ -183,7 +197,7 @@ heads   [4]:
 lr      [3e-4]:
 ```
 
-Answering `y` to `save` prompts for a path (default: auto-timestamped in `models/`).
+Answering `y` to `save` prompts for a path (default: auto-named in `models/`).
 
 After settings are confirmed, training runs and returns to the main menu when complete.
 
@@ -212,66 +226,88 @@ Runs CPU and accelerator training back-to-back and reports throughput and speedu
 
 ## Saving and artifacts
 
-Training saves two artifact files when `--save` is used:
+Training save and resume now write a run folder in `models/` with three files:
 
-- `.checkpoint.pt` — full resume artifact. Includes model weights, tokenizer, dataset snapshot, optimizer state, scaler state, resume state, and RNG state.
-- `.model.pt` — inference-only artifact. Includes model weights and tokenizer. Smaller and sufficient for generation.
+- `.model.pt` — primary PyTorch artifact. Includes model weights and tokenizer. This is the file the manager lists and the file you load by default.
+- `.resume.pt` — internal resume companion. Includes dataset snapshot, optimizer state, scaler state, resume state, and RNG state.
+- `.model` — JavaScript bundle. Single-file ONNX bundle for `onnxruntime-node`.
 
 ### Save during training (CLI)
 
-Save to an auto-timestamped pair in `models/`:
+Save to an auto-named run folder in `models/`:
 
 ```powershell
-python foundationgpt.py --save
+python phrasedreamgpt.py --save
 ```
 
-Save to a specific base path (produces both `.checkpoint.pt` and `.model.pt`):
+Save to a named run folder:
 
 ```powershell
-python foundationgpt.py --save models\my_run
+python phrasedreamgpt.py --save my_run
 ```
 
-Save to an explicit checkpoint path (derives the paired `.model.pt` automatically):
+Examples:
 
-```powershell
-python foundationgpt.py --save models\my_run.checkpoint.pt
+```text
+models\
+  halluciname\
+    halluciname.model.pt
+    halluciname.resume.pt
+    halluciname.model
 ```
 
 ### Save path rules
 
-- No suffix → treated as a base path, produces both `.checkpoint.pt` and `.model.pt`
-- An explicit `.checkpoint.*` or `.model.*` suffix → uses that exact path and derives the paired artifact
-- A bare `.pt` or `.pth` suffix → treated as the checkpoint path, produces a sibling `.model.*` file
+- `--save` with no path creates `models/<dataset>/`
+- If that folder already exists, the next run becomes `models/<dataset>_2/`, then `_3`, and so on
+- `--save my_run` creates `models/my_run/`
+- If the save target is a direct child of `models/`, the files inside use the clean run name, not the full folder name
+- Relative paths that include folders keep the path you wrote; bare names resolve inside `models/`
 
 ### Save from the interactive menu
 
-Answer `y` to the `save` prompt in train settings. The path prompt accepts the same formats above; pressing Enter uses the auto-timestamped default.
+Answer `y` to the `save` prompt in train settings. The path prompt accepts the same formats above; pressing Enter uses the auto-named default.
+
+## JavaScript runtime
+
+Saving or resuming already writes the JS bundle automatically.
+
+Run the newest bundle:
+
+```powershell
+npm install
+node run_js_bundle.js
+```
+
+Or run a specific bundle by file name:
+
+```powershell
+node run_js_bundle.js halluciname.model --samples 40 --temperature 0.7
+```
 
 ## Artifact manager
 
 Open the artifact manager:
 
 ```powershell
-python foundationgpt.py --models
+python phrasedreamgpt.py --models
 ```
 
 Or select `2 models` from the main menu.
 
-The manager lists all `.pt` / `.pth` files in `models/` (sorted by modification time, newest first) and lets you select one by number. The available actions depend on whether the artifact is a checkpoint or a model-only file.
+The manager lists primary `.model.pt` / `.model.pth` artifacts in `models/` (sorted by modification time, newest first) and lets you select one by number. The available actions depend on whether that model still has its paired resume data.
 
-**Checkpoint actions:** `[L]oad  [R]esume  [E]xport  [I]nspect  [D]elete`
+**Resumable model actions:** `[L]oad  [R]esume  [I]nspect  [D]elete`
 
 **Model-only actions:** `[L]oad  [I]nspect  [D]elete`
 
 ### Load
 
-Loads the artifact and runs generation. Prompts for number of samples and temperature before running.
-
-Checkpoints and model-only artifacts are both supported for loading.
+Loads the selected model artifact and runs generation. Prompts for number of samples and temperature before running.
 
 ### Resume
 
-Resumes training from a checkpoint. Before prompting, shows the checkpoint name, original dataset path, and how many steps have already been completed — so you know the context before deciding how many additional steps to run.
+Resumes training from a resumable model. Before prompting, shows the model path, original dataset path, and how many steps have already been completed.
 
 Resume settings prompt:
 
@@ -283,16 +319,12 @@ samples   [20]:
 temp      [0.8]:
 ```
 
-- `steps` — additional steps beyond what the checkpoint has already completed
-- `new path` — if `n`, the resume writes back to the source checkpoint and refreshes its paired `.model.*` artifact; if `y`, prompts for a new path and saves a fresh artifact pair
+- `steps` — additional steps beyond what the resume data has already completed
+- `new path` — if `n`, the resume writes back to the source run and refreshes its `.model.pt`, `.resume.pt`, and `.model` files; if `y`, prompts for a new path and saves a fresh artifact set
 
-Architecture, optimizer hyperparameters, dtype, AMP, and compile preferences are all locked to the checkpoint — they cannot be changed on resume.
+Architecture, optimizer hyperparameters, dtype, AMP, and compile preferences are all locked to the saved resume data — they cannot be changed on resume.
 
-The resolved runtime (device, effective AMP, AMP dtype, effective compile) must match the checkpoint's recorded runtime for exact resume.
-
-### Export
-
-Strips the resume state from a checkpoint and saves a smaller model-only artifact. Prompts for an output path (pressing Enter uses the default `.model.pt` companion path).
+The resolved runtime (device, effective AMP, AMP dtype, effective compile) must match the original run's recorded runtime for exact resume.
 
 ### Inspect
 
@@ -307,13 +339,13 @@ Asks you to type `DELETE` to confirm before removing the file.
 Any argument passed on the command line skips the interactive menu and runs the training pipeline directly. This is useful for scripted or automated runs.
 
 ```powershell
-python foundationgpt.py --steps 1000 --save
-python foundationgpt.py --input datasets\mydata.txt --steps 5000 --device cuda --save models\myrun
-python foundationgpt.py --compare --compare-steps 500
-python foundationgpt.py --models
+python phrasedreamgpt.py --steps 1000 --save
+python phrasedreamgpt.py --dataset mydata.txt --steps 5000 --device cuda --save myrun
+python phrasedreamgpt.py --compare --compare-steps 500
+python phrasedreamgpt.py --models
 ```
 
-Dataset selection in scripting mode: if `--input` is omitted and only one `.txt` file exists in `--datasets-dir`, it is selected automatically. If multiple files exist, the script errors unless stdin is a terminal (in which case it prompts).
+Dataset selection in scripting mode: if `--dataset` is omitted and only one `.txt` file exists in `datasets/`, it is selected automatically. If multiple files exist, the script errors unless stdin is a terminal (in which case it prompts).
 
 ## Runtime behavior
 
@@ -333,10 +365,9 @@ Dataset selection in scripting mode: if `--input` is omitted and only one `.txt`
 
 ## Flag reference
 
-Run `python foundationgpt.py --help` for the full CLI help text.
+Run `python phrasedreamgpt.py --help` for the full CLI help text.
 
-- `--input PATH`
-- `--datasets-dir PATH`
+- `--dataset PATH`
 - `--steps N`
 - `--batch-size N`
 - `--block-size N`
@@ -360,7 +391,6 @@ Run `python foundationgpt.py --help` for the full CLI help text.
 - `--temperature FLOAT`
 - `--save [PATH]`
 - `--models`
-- `--models-dir PATH`
 - `--compare`
 - `--compare-steps N`
 - `--no-generate`
