@@ -1,4 +1,5 @@
 {
+  "name": "phrasedreamgpt",
   "scripts": {
     "run-js": "node run_js_bundle.js"
   },

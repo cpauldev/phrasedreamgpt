@@ -3,8 +3,8 @@
  *
  * Usage:
  *   node run_js_bundle.js
- *   node run_js_bundle.js halluciname.model
- *   node run_js_bundle.js halluciname.model --samples 30 --temperature 0.7
+ *   node run_js_bundle.js english_names.model
+ *   node run_js_bundle.js english_names.model --samples 30 --temperature 0.7
  *
  * If no bundle path is provided, the newest `*.model` file anywhere in `models/` is used.
  */
@@ -27,8 +27,8 @@ const USAGE_TEXT = [
   "",
   "Examples:",
   "  node run_js_bundle.js",
-  "  node run_js_bundle.js halluciname.model",
-  "  node run_js_bundle.js halluciname.model --samples 40 --temperature 0.7",
+  "  node run_js_bundle.js english_names.model",
+  "  node run_js_bundle.js english_names.model --samples 40 --temperature 0.7",
 ].join("\n");
 
 function printUsage() {

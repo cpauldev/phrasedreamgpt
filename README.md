@@ -1,272 +1,190 @@
+![PhraseDreamGPT banner](assets/phrasedreamgpt.png)
+
 # PhraseDreamGPT
 
-`PhraseDreamGPT` is a **Character-Level Language Model (CLM)** built on a **GPT architecture** — a trainer and inference script for local text datasets. It supports CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, with an interactive main menu, artifact-based save/load/resume, automatic JS bundle output, and device benchmarking.
+`PhraseDreamGPT` trains a character-level transformer on any newline-delimited text file and generates additional strings that follow the character patterns, structure, and common sequences learned from that dataset rather than returning only items from the source list.
+
+*It supports saved and resumable runs, CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, and a bundled JavaScript runtime.*
 
 Primary script: `phrasedreamgpt.py`
 
-## Table of Contents
+## Table of contents
 
-- [What it provides](#what-it-provides)
 - [Use cases](#use-cases)
-- [Architecture](#architecture)
-- [Optimization](#optimization)
 - [Requirements](#requirements)
+- [Architecture and training](#architecture-and-training)
 - [Setup](#setup)
-- [Included dataset: halluciname](#included-dataset-halluciname)
-- [Using your own dataset](#using-your-own-dataset)
-- [Interactive menu](#interactive-menu)
-- [Saving and artifacts](#saving-and-artifacts)
+- [Quick start](#quick-start)
+- [Datasets](#datasets)
+- [Saved runs](#saved-runs)
 - [JavaScript runtime](#javascript-runtime)
+- [Interactive menu](#interactive-menu)
 - [Artifact manager](#artifact-manager)
-- [CLI scripting mode](#cli-scripting-mode)
-- [Runtime behavior](#runtime-behavior)
-- [Flag reference](#flag-reference)
-
-## What it provides
-
-- Interactive main menu when run with no arguments
-- Character-level GPT training from a local newline-delimited text file
-- Transformer blocks with RMSNorm and SwiGLU feed-forward layers
-- Inference from saved artifacts without retraining
-- Exact resume from saved models that still have their resume data
-- Automatic creation of Python and JS inference artifacts on save/resume
-- CPU, CUDA, and MPS execution modes
-- Optional CUDA AMP and `torch.compile`
-- CPU vs accelerator benchmarking (auto-detects CUDA or MPS)
-- Interactive artifact manager for loading, resuming, inspecting, and deleting artifacts
+- [Common commands](#common-commands)
 
 ## Use cases
 
-Train on any newline-delimited text file. The model learns the underlying character patterns — rhythm, structure, common sequences — and generates new outputs that fit the same style without directly copying from the training data. Unlike a static list, it generalises, so every output is novel and generation is effectively unlimited.
+`PhraseDreamGPT` is suited to tasks where short generated text should match the character patterns of a source distribution.
 
-Example applications:
+##### Research application
 
-- **Procedural content** — place names, species names, fictional languages, or any structured short-form text
-- **Baby names** — train on cultural or regional name lists to generate names with a specific style or origin
-- **Brand and product names** — derive name candidates that fit the phonetic profile of an existing brand portfolio
-- **Username generation** — produce handles that conform to a learned stylistic convention
-- **Medical or scientific terminology** — learn from domain-specific vocabulary to generate plausible new compound terms
+`PhraseDreamGPT` can be used to generate and score controlled text inputs for language-model evaluation and interpretability workflows. When trained on a focused dataset such as English words or short structured strings, it can produce realistic made-up words or short text spans that match the style of the source data *without referring to a specific real entity.* This is useful when constructing test inputs for larger models, especially when the goal is to distinguish responses driven by spelling and pattern familiarity from responses driven by memorized knowledge about a real word or entity.
 
-## Architecture
+This framing is relevant to feature- and circuit-analysis workflows such as:
 
-`PhraseDreamGPT` is a decoder-only GPT and character language model — a transformer that operates at the character level rather than the word or subword token level.
+- Entity recognition and unfamiliar-entity handling
+- Hallucination studies
+- Refusal and harmful-request recognition
+- Jailbreak mechanism analysis
+- Chain-of-thought faithfulness checks
+- Hidden-goal or persona-conditioned behavior probes
 
-It uses:
+Example workflow:
 
-- Causal self-attention in the style of [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
-- [RMSNorm](https://arxiv.org/abs/1910.07467) instead of LayerNorm
-- [SwiGLU](https://arxiv.org/abs/2002.05202) feed-forward layers
+1. Train `PhraseDreamGPT` on a focused distribution such as English words or short text spans.
+1. Generate or score synthetic words — a generated word like `branith` may fit the distribution better than `xqzptl`.
+1. Place those strings into prompt templates with matched controls such as real terms, generated terms, obvious gibberish, or minimal edits.
+1. Run the target language model on those prompts.
+1. Use interpretability tools such as sparse autoencoders (SAEs) or attribution graphs to compare which features or circuits activate.
 
-The feed-forward design follows the modern gated MLP direction used by later large language models such as [LLaMA](https://arxiv.org/abs/2302.13971).
+Related interpretability research from Anthropic includes:
 
-## Optimization
+- [Tracing the thoughts of a large language model](https://www.anthropic.com/research/tracing-thoughts-language-model)
+- [Scaling Monosemanticity: Extracting Interpretable Features from Claude 3 Sonnet](https://transformer-circuits.pub/2024/scaling-monosemanticity/index.html)
+- [On the Biology of a Large Language Model](https://transformer-circuits.pub/2025/attribution-graphs/biology.html)
 
-Training uses:
+The same setup can also be used for candidate scoring or filtering based on how well a string fits the training distribution.
 
-- [AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
-- Linear learning-rate decay over the configured training steps
-- Optional CUDA AMP for mixed-precision training
-- Optional `torch.compile` when the runtime supports it
+##### General application
+
+- Procedural content such as place names, species names, fictional languages, or other structured short-form text
+- Baby names based on regional, cultural, or stylistic name lists
+- Brand and product names derived from an existing naming style
+- Username generation for a specific character pattern or tone
+- Medical or scientific terms generated from domain-specific vocabulary
 
 ## Requirements
 
 - Python 3.10+
 - PyTorch
-- Optional: NVIDIA CUDA for `--device cuda`
+- Optional: CUDA for `--device cuda`
 - Optional: Apple Silicon / MPS for `--device mps`
-- Optional: a compatible `triton` provider for CUDA compile mode
+- Optional: `triton` support if you want CUDA compile mode
+
+## Architecture and training
+
+The model is a decoder-only, character-level GPT. It uses:
+
+- Causal self-attention in the style of [Attention Is All You Need](https://arxiv.org/abs/1706.03762), implemented with [`torch.nn.functional.scaled_dot_product_attention`](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+- [RMSNorm](https://arxiv.org/abs/1910.07467)
+- [SwiGLU](https://arxiv.org/abs/2002.05202) feed-forward layers
+- [AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
+- Linear learning-rate decay over the configured training steps
+- Optional CUDA AMP for mixed-precision training
+- Optional [`torch.compile`](https://pytorch.org/docs/stable/generated/torch.compile.html) on CUDA when Triton and the runtime support it
+- Bundled ONNX export for Node.js inference through [`onnxruntime-node`](https://www.npmjs.com/package/onnxruntime-node)
 
 ## Setup
 
-### 1) Create and activate a virtual environment
-
-Windows PowerShell:
+Create and activate a virtual environment:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 2) Install PyTorch
-
-Use the official PyTorch install selector for the exact command that matches your OS, Python version, and accelerator:
-
-`https://pytorch.org/get-started/locally/`
-
-Quick CPU / macOS install:
+Install PyTorch:
 
 ```powershell
 python -m pip install -U pip
 python -m pip install torch
 ```
 
-If you plan to train on CUDA, install the CUDA-enabled wheel that PyTorch recommends for your platform from the selector above.
+If you plan to train on CUDA, install the CUDA-enabled wheel recommended by the [PyTorch install selector](https://pytorch.org/get-started/locally/).
 
-### 3) Install Triton if you want compile mode on CUDA
-
-`--compile` and auto-compile mode both require a working `triton` Python module on CUDA.
-
-Platform notes:
-
-- On Linux, that usually means a compatible `triton` installation from your PyTorch environment.
-- On native Windows, the package is typically `triton-windows`, which provides the importable `triton` module used by this script.
-
-If your environment does not have compatible Triton support, use `--no-compile`.
-
-### 4) Verify your runtime
-
-General check:
+If you want to run the JS bundle:
 
 ```powershell
-python -c "import torch; print(torch.__version__); print('cuda', torch.cuda.is_available()); print('mps', hasattr(torch.backends, 'mps') and torch.backends.mps.is_available())"
+npm install
 ```
 
-CUDA device name:
+## Quick start
+
+Train with the included dataset:
 
 ```powershell
-python -c "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO CUDA')"
+python phrasedreamgpt.py --dataset english_names.txt
 ```
 
-## Included dataset: halluciname
-
-The repository ships with `datasets/halluciname.txt` — a list of **32,033 human first names**, one per line, ranging from common to rare across many cultures and spellings.
-
-Running the default training configuration on this dataset produces a model that generates **novel plausible-sounding names** — strings that follow the character-level patterns of real names without repeating them verbatim. At 3,000 steps with default settings the model reliably produces coherent name-like outputs. With more steps or a larger architecture the outputs become more varied and better calibrated to the distribution of the training names.
-
-This makes it a good first dataset for verifying the full pipeline: training, generation, saving, resuming, and the JS runtime all work against a small, fast-converging target.
-
-## Using your own dataset
-
-- Place `.txt` files in the `datasets/` directory, one sample per line, no empty lines needed between entries
-- The script strips empty lines automatically
-- When `--dataset` is omitted, the script auto-selects if one file is present in `datasets/`, or shows a numbered list when multiple are found
-- Pass a specific file with `--dataset PATH` to bypass auto-selection entirely
-- Bare dataset names such as `--dataset halluciname.txt` resolve inside `datasets/`
-- The dataset is shuffled before tokenization, and a character vocabulary is built from all characters present
-- The token stream must contain at least `block_size + 2` tokens after tokenization
-- The dataset file name stem is used as the base name for saved run folders
-
-## Interactive menu
-
-Running the script with no arguments opens the main menu:
-
-```
-python phrasedreamgpt.py
-```
-
-```
---- phrasedreamgpt ---
-
-1  train
-2  models
-3  benchmark
-Q  quit
-
-select:
-```
-
-### 1 — train
-
-Prompts for the dataset (if multiple are present), then shows train settings:
-
-```
---- train settings ---
-device    (auto/cpu/cuda/mps)  [auto]:
-steps     [3000]:
-advanced  (y/n)  [n]:
-save      (y/n)  [n]:
-samples   [20]:
-temp      [0.8]:
-```
-
-Answering `y` to `advanced` exposes architecture and optimizer settings:
-
-```
-batch   [256]:
-block   [32]:
-layers  [4]:
-embd    [128]:
-heads   [4]:
-lr      [3e-4]:
-```
-
-Answering `y` to `save` prompts for a path (default: auto-named in `models/`).
-
-After settings are confirmed, training runs and returns to the main menu when complete.
-
-### 2 — models
-
-Opens the artifact manager. See [Artifact manager](#artifact-manager).
-
-### 3 — benchmark
-
-Auto-detects the available accelerator (CUDA first, then MPS). Errors if neither is present. Shows what will run, then prompts for steps per device before starting:
-
-```
---- dataset ---
-file    halluciname.txt
-...
-
---- benchmark ---
-accelerator  cuda
-comparing    cpu vs cuda
-
---- benchmark settings ---
-steps per device  [400]:
-```
-
-Runs CPU and accelerator training back-to-back and reports throughput and speedup.
-
-## Saving and artifacts
-
-Training save and resume now write a run folder in `models/` with three files:
-
-- `.model.pt` — primary PyTorch artifact. Includes model weights and tokenizer. This is the file the manager lists and the file you load by default.
-- `.resume.pt` — internal resume companion. Includes dataset snapshot, optimizer state, scaler state, resume state, and RNG state.
-- `.model` — JavaScript bundle. Single-file ONNX bundle for `onnxruntime-node`.
-
-### Save during training (CLI)
-
-Save to an auto-named run folder in `models/`:
+Run the newest saved JS bundle:
 
 ```powershell
-python phrasedreamgpt.py --save
+node run_js_bundle.js
 ```
 
-Save to a named run folder:
+Open the interactive model manager:
 
 ```powershell
-python phrasedreamgpt.py --save my_run
+python phrasedreamgpt.py --models
 ```
 
-Examples:
+Run a benchmark:
+
+```powershell
+python phrasedreamgpt.py --compare
+```
+
+## Datasets
+
+The repository includes:
+
+- `datasets/english_names.txt`, a newline-delimited list of names
+- `datasets/english_words.txt`, a newline-delimited list of English words
+
+The current saved runs in `models/` include:
+
+- `models/english_names/`
+- `models/english_words/`
+
+To use your own dataset:
+
+- Place a `.txt` file in `datasets/`
+- Use one sample per line
+- Pass `--dataset PATH` to choose a specific file
+- Bare file names such as `--dataset english_names.txt` resolve inside `datasets/`
+
+## Saved runs
+
+Saving and resuming write a run folder in `models/` with three files:
+
+| File         | Purpose                                                                                                                               | Needed later              |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `.model.pt`  | Primary PyTorch artifact with model weights and tokenizer. This is the file the manager lists and the file used for Python inference. | Yes, for Python inference |
+| `.resume.pt` | Resume companion data with dataset snapshot, optimizer state, scaler state, resume state, and RNG state.                              | Only for exact resume     |
+| `.model`     | JavaScript bundle for `run_js_bundle.js`.                                                                                             | Only for JS inference     |
+
+Default save behavior:
+
+- Training and resume save automatically.
+- By default, a run based on `mydata.txt` is saved to `models/mydata/`.
+- If that folder already exists, the next run becomes `models/mydata_2/`, then `_3`, and so on.
+- Use `--output my_run` to save to `models/my_run/`.
+- Use `--no-save` to skip writing artifacts.
+
+Example:
 
 ```text
 models\
-  halluciname\
-    halluciname.model.pt
-    halluciname.resume.pt
-    halluciname.model
+  english_names\
+    english_names.model.pt
+    english_names.resume.pt
+    english_names.model
 ```
 
-### Save path rules
+Generated out-of-dataset sample files are stored in `results/`:
 
-- `--save` with no path creates `models/<dataset>/`
-- If that folder already exists, the next run becomes `models/<dataset>_2/`, then `_3`, and so on
-- `--save my_run` creates `models/my_run/`
-- If the save target is a direct child of `models/`, the files inside use the clean run name, not the full folder name
-- Relative paths that include folders keep the path you wrote; bare names resolve inside `models/`
-
-### Save from the interactive menu
-
-Answer `y` to the `save` prompt in train settings. The path prompt accepts the same formats above; pressing Enter uses the auto-named default.
+- `results/nonenglish_names.txt`
+- `results/nonenglish_words.txt`
 
 ## JavaScript runtime
 
@@ -275,122 +193,66 @@ Saving or resuming already writes the JS bundle automatically.
 Run the newest bundle:
 
 ```powershell
-npm install
 node run_js_bundle.js
 ```
 
-Or run a specific bundle by file name:
+Run a specific bundle by file name:
 
 ```powershell
-node run_js_bundle.js halluciname.model --samples 40 --temperature 0.7
+node run_js_bundle.js english_names.model --samples 40 --temperature 0.7
 ```
+
+If more than one saved run contains the same bundle file name, pass a relative or full path instead:
+
+```powershell
+node run_js_bundle.js models\english_names_2\english_names.model
+```
+
+## Interactive menu
+
+Running the script with no arguments opens the main menu:
+
+```powershell
+python phrasedreamgpt.py
+```
+
+Menu options:
+
+- `train` prompts for dataset and training settings
+- `models` opens the saved run manager
+- `benchmark` compares CPU with the detected accelerator
 
 ## Artifact manager
 
-Open the artifact manager:
+Open it with:
 
 ```powershell
 python phrasedreamgpt.py --models
 ```
 
-Or select `2 models` from the main menu.
+The manager lists saved runs in `models/`, sorted by modification time. Standard run folders are shown by run name; nonstandard/manual layouts fall back to a relative path.
 
-The manager lists primary `.model.pt` / `.model.pth` artifacts in `models/` (sorted by modification time, newest first) and lets you select one by number. The available actions depend on whether that model still has its paired resume data.
+Available actions:
 
-**Resumable model actions:** `[L]oad  [R]esume  [I]nspect  [D]elete`
+- `Load` runs inference from the selected `.model.pt`
+- `Resume` continues training when the matching `.resume.pt` file exists
+- `Inspect` prints artifact details
+- `Delete` removes the selected model artifact and its companion files
 
-**Model-only actions:** `[L]oad  [I]nspect  [D]elete`
+If the `.resume.pt` file is removed, the run remains loadable but is no longer resumable.
 
-### Load
-
-Loads the selected model artifact and runs generation. Prompts for number of samples and temperature before running.
-
-### Resume
-
-Resumes training from a resumable model. Before prompting, shows the model path, original dataset path, and how many steps have already been completed.
-
-Resume settings prompt:
-
-```
---- resume settings ---
-steps     [3000]:
-new path  (y/n)  [n]:
-samples   [20]:
-temp      [0.8]:
-```
-
-- `steps` — additional steps beyond what the resume data has already completed
-- `new path` — if `n`, the resume writes back to the source run and refreshes its `.model.pt`, `.resume.pt`, and `.model` files; if `y`, prompts for a new path and saves a fresh artifact set
-
-Architecture, optimizer hyperparameters, dtype, AMP, and compile preferences are all locked to the saved resume data — they cannot be changed on resume.
-
-The resolved runtime (device, effective AMP, AMP dtype, effective compile) must match the original run's recorded runtime for exact resume.
-
-### Inspect
-
-Prints full artifact metadata: path, size, modification time, model config, tokenizer info, training config, and resume state.
-
-### Delete
-
-Asks you to type `DELETE` to confirm before removing the file.
-
-## CLI scripting mode
-
-Any argument passed on the command line skips the interactive menu and runs the training pipeline directly. This is useful for scripted or automated runs.
+## Common commands
 
 ```powershell
-python phrasedreamgpt.py --steps 1000 --save
-python phrasedreamgpt.py --dataset mydata.txt --steps 5000 --device cuda --save myrun
+python phrasedreamgpt.py --steps 1000
+python phrasedreamgpt.py --dataset mydata.txt --steps 5000 --device cuda --output myrun
+python phrasedreamgpt.py --dataset mydata.txt --no-save
+python phrasedreamgpt.py --models
 python phrasedreamgpt.py --compare --compare-steps 500
-python phrasedreamgpt.py --models
 ```
 
-Dataset selection in scripting mode: if `--dataset` is omitted and only one `.txt` file exists in `datasets/`, it is selected automatically. If multiple files exist, the script errors unless stdin is a terminal (in which case it prompts).
+For the full CLI, run:
 
-## Runtime behavior
-
-- `--device auto` resolves to CUDA, then MPS, then CPU
-- `--device cuda` is strict and errors if CUDA is unavailable
-- `--device mps` is strict and errors if MPS is unavailable
-- `--compare` auto-detects the accelerator (CUDA first, then MPS) and errors if neither is available; it does not combine with `--save` or `--models`
-- `--amp` and explicit CUDA dtypes are CUDA-only
-- `--dtype fp32` disables AMP
-- With no AMP flag on CUDA, the script enables AMP automatically and chooses `bf16` when supported, otherwise `fp16`
-- `--compile` is CUDA-only and strict; without an explicit compile flag, the script compiles automatically on CUDA when both `torch.compile` and Triton are available
-- `torch.compile` availability depends on the current PyTorch build, Python version, and backend support in your environment
-- On Windows, `triton-windows` is the package you are most likely using when the script detects a `triton` module
-- Use `--no-compile` to force eager mode
-- Use `--no-generate` to skip post-training or post-load generation entirely
-- Use `--samples 0` to keep the generation path enabled but request zero samples
-
-## Flag reference
-
-Run `python phrasedreamgpt.py --help` for the full CLI help text.
-
-- `--dataset PATH`
-- `--steps N`
-- `--batch-size N`
-- `--block-size N`
-- `--n-layer N`
-- `--n-embd N`
-- `--n-head N`
-- `--learning-rate FLOAT`
-- `--beta1 FLOAT`
-- `--beta2 FLOAT`
-- `--eps FLOAT`
-- `--weight-decay FLOAT`
-- `--seed N`
-- `--device {auto,cpu,cuda,mps}`
-- `--dtype {auto,fp32,fp16,bf16}`
-- `--amp`
-- `--no-amp`
-- `--compile`
-- `--no-compile`
-- `--print-every N`
-- `--samples N`
-- `--temperature FLOAT`
-- `--save [PATH]`
-- `--models`
-- `--compare`
-- `--compare-steps N`
-- `--no-generate`
+```powershell
+python phrasedreamgpt.py --help
+```

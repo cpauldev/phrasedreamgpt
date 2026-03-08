@@ -9,9 +9,6 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Models and artifacts
-models/
-
 # Node
 node_modules/
 

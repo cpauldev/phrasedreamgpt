@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import random
 import shutil
@@ -14,7 +15,7 @@ import sys
 import tempfile
 import time
 import warnings
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,22 @@ def ensure_utf8_stdio() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
+
+
+def export_onnx_quietly(*args, **kwargs) -> None:
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+    try:
+        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+            torch.onnx.export(*args, **kwargs)
+    except Exception:
+        stdout_text = stdout_buffer.getvalue().strip()
+        stderr_text = stderr_buffer.getvalue().strip()
+        if stdout_text:
+            print(stdout_text)
+        if stderr_text:
+            print(stderr_text, file=sys.stderr)
+        raise
 
 
 @dataclass(frozen=True)
@@ -597,20 +614,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature.")
     parser.add_argument(
-        "--save",
-        nargs="?",
-        const="auto",
+        "--output",
+        dest="save",
+        default="auto",
         metavar="PATH",
         help=(
-            "Save a primary model, resume data, and a JS bundle. Omit PATH "
-            "to save into a clean run folder in models/. If the folder name already exists, "
-            "a numeric suffix is added. Bare names resolve inside models/."
+            "Override the automatic save location. Bare names resolve inside models/. "
+            "Use --no-save to disable writing artifacts."
         ),
+    )
+    parser.add_argument(
+        "--no-save",
+        dest="save",
+        action="store_const",
+        const=None,
+        help="Disable automatic saving after training or resume.",
     )
     parser.add_argument(
         "--compare",
         action="store_true",
-        help="Run short benchmark on CPU and CUDA (if available).",
+        help="Run short benchmark on CPU and the detected accelerator (CUDA or MPS).",
     )
     parser.add_argument(
         "--compare-steps", type=int, default=400, help="Steps per device in compare mode."
@@ -683,15 +706,17 @@ def validate_args(args: argparse.Namespace) -> None:
             "Run compare mode by itself, or run the artifact operation separately.",
         )
 
-    if args.compare and args.save is not None:
+    explicit_save_path = args.save not in {None, "auto"}
+
+    if args.compare and explicit_save_path:
         fail(
-            "--compare cannot be combined with --save.",
-            ("Run a normal training command to save a model, or remove --save for compare mode."),
+            "--compare cannot be combined with --output.",
+            "Run compare mode by itself, or remove --output.",
         )
 
-    if args.save is not None and active_artifact_operations:
+    if explicit_save_path and active_artifact_operations:
         fail(
-            "--save cannot be combined with artifact management commands.",
+            "--output cannot be combined with artifact management commands.",
             "Train a model to save it, or run the artifact operation separately.",
         )
 
@@ -910,7 +935,7 @@ def print_available_artifacts(models_dir: Path) -> None:
         stat = path.stat()
         rows.append(
             (
-                format_display_path(path, models_dir),
+                format_artifact_display_name(path, models_dir),
                 infer_artifact_type_from_path(path),
                 datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 format_file_size(stat.st_size),
@@ -918,12 +943,12 @@ def print_available_artifacts(models_dir: Path) -> None:
         )
 
     index_w = len(str(len(rows)))
-    name_w = max(len(r[0]) for r in rows + [("name", "", "", "")])
+    name_w = max(len(r[0]) for r in rows + [("run", "", "", "")])
     type_w = max(len(r[1]) for r in rows + [("", "type", "", "")])
     size_w = max(len(r[3]) for r in rows + [("", "", "", "size")])
 
     pad = " " * (index_w + 2)
-    print(f"{pad}{'name':{name_w}}  {'type':{type_w}}  {'modified':{19}}  {'size':>{size_w}}")
+    print(f"{pad}{'run':{name_w}}  {'type':{type_w}}  {'modified':{19}}  {'size':>{size_w}}")
     print(f"{pad}{'-' * name_w}  {'-' * type_w}  {'-' * 19}  {'-' * size_w}")
     for index, (name, artifact_type, modified_at, size) in enumerate(rows, start=1):
         print(
@@ -975,14 +1000,16 @@ def resolve_resume_save_paths(
     source_artifact_path: Path,
     models_dir: Path,
     input_stem: str = "phrasedreamgpt",
-) -> ArtifactPaths:
-    if save_model_arg is not None:
-        resolved_paths = resolve_save_paths(save_model_arg, models_dir, input_stem)
-        if resolved_paths is None:
-            fail("Internal error: resume save paths were not resolved.", "Retry the command.")
-        return resolved_paths
+) -> ArtifactPaths | None:
+    if save_model_arg is None:
+        return None
+    if save_model_arg == "auto":
+        return describe_artifact_path(source_artifact_path).save_paths()
 
-    return describe_artifact_path(source_artifact_path).save_paths()
+    resolved_paths = resolve_save_paths(save_model_arg, models_dir, input_stem)
+    if resolved_paths is None:
+        fail("Internal error: resume save paths were not resolved.", "Retry the command.")
+    return resolved_paths
 
 
 def list_input_files(directory: Path) -> list[Path]:
@@ -1009,6 +1036,25 @@ def format_display_path(path: Path, root_dir: Path) -> str:
         return str(path.relative_to(root_dir))
     except ValueError:
         return str(path)
+
+
+def format_artifact_display_name(path: Path, root_dir: Path) -> str:
+    artifact_spec = describe_artifact_path(path)
+    expected_model_path = artifact_spec.paired_paths.model
+
+    try:
+        relative_directory = artifact_spec.artifact_directory.relative_to(root_dir)
+    except ValueError:
+        return format_display_path(path, root_dir)
+
+    if (
+        artifact_spec.explicit_type == "model"
+        and path == expected_model_path
+        and artifact_spec.artifact_directory.name == artifact_spec.artifact_stem
+    ):
+        return str(relative_directory)
+
+    return format_display_path(path, root_dir)
 
 
 def resolve_output_path_arg(path_arg: str, default_dir: Path) -> Path:
@@ -1779,7 +1825,7 @@ def export_js_model_bundle(
                 message=r"`isinstance\(treespec, LeafSpec\)` is deprecated",
                 category=FutureWarning,
             )
-            torch.onnx.export(
+            export_onnx_quietly(
                 model,
                 dummy,
                 str(temp_onnx_path),
@@ -2545,13 +2591,15 @@ def run_resume_training_for_path(
     )
     print_training_summary(result)
 
-    saved_paths = save_training_result_artifacts(
-        result,
-        dataset,
-        resumed_args,
-        resolve_resume_save_paths(user_args.save, artifact_path, models_dir, input_stem),
-    )
-    print_saved_artifact_paths(saved_paths, updated=user_args.save is None)
+    save_paths = resolve_resume_save_paths(user_args.save, artifact_path, models_dir, input_stem)
+    if save_paths is not None:
+        saved_paths = save_training_result_artifacts(
+            result,
+            dataset,
+            resumed_args,
+            save_paths,
+        )
+        print_saved_artifact_paths(saved_paths, updated=user_args.save == "auto")
     maybe_run_generation(user_args, result.model, dataset, device)
 
 
@@ -2601,7 +2649,8 @@ def prompt_train_settings(args: argparse.Namespace) -> argparse.Namespace:
         new_args.learning_rate = prompt_positive_float(f"{'lr':{adv_w}}", new_args.learning_rate)
 
     if prompt_bool(f"{'save':{label_w}}", new_args.save is not None):
-        path_input = prompt_with_default(f"{'path':{label_w}}", "auto")
+        default_path = "auto" if new_args.save in {None, "auto"} else str(new_args.save)
+        path_input = prompt_with_default(f"{'path':{label_w}}", default_path)
         new_args.save = path_input
     else:
         new_args.save = None
@@ -2617,14 +2666,19 @@ def prompt_resume_settings(args: argparse.Namespace) -> argparse.Namespace:
     print_section("resume settings")
     new_args = argparse.Namespace(**vars(args))
 
-    labels = ["steps", "new path", "path", "samples", "temp"]
+    labels = ["steps", "save", "new path", "path", "samples", "temp"]
     label_w = max(len(s) for s in labels)
 
     new_args.steps = prompt_positive_int(f"{'steps':{label_w}}", new_args.steps)
 
-    if prompt_bool(f"{'new path':{label_w}}", new_args.save is not None):
-        path_input = prompt_with_default(f"{'path':{label_w}}", "auto")
-        new_args.save = path_input
+    if prompt_bool(f"{'save':{label_w}}", new_args.save is not None):
+        default_new_path = new_args.save not in {None, "auto"}
+        if prompt_bool(f"{'new path':{label_w}}", default_new_path):
+            default_path = "auto" if new_args.save in {None, "auto"} else str(new_args.save)
+            path_input = prompt_with_default(f"{'path':{label_w}}", default_path)
+            new_args.save = path_input
+        else:
+            new_args.save = "auto"
     else:
         new_args.save = None
 
@@ -2720,11 +2774,11 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
             return
 
         print_available_artifacts(models_dir)
-        selection = prompt_user("select an artifact number, or Q to quit: ").lower()
+        selection = prompt_user("select a run number, or Q to quit: ").lower()
         if selection in {"q", "quit", "exit"}:
             return
         if not selection.isdigit():
-            print("enter a valid artifact number, or Q to quit")
+            print("enter a valid run number, or Q to quit")
             continue
 
         index = int(selection)
@@ -2734,7 +2788,7 @@ def interactive_artifact_manager(args: argparse.Namespace, models_dir: Path) -> 
 
         artifact_path = artifacts[index - 1]
         is_resumable = artifact_path_supports_resume(artifact_path)
-        display_path = format_display_path(artifact_path, models_dir)
+        display_path = format_artifact_display_name(artifact_path, models_dir)
 
         while True:
             print(f"selected: {display_path}")
