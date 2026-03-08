@@ -141,6 +141,11 @@ The repository includes:
 - `datasets/english_names.txt`, a newline-delimited list of names
 - `datasets/english_words.txt`, a newline-delimited list of English words
 
+Dataset sources:
+
+- `english_names.txt` was flattened and deduplicated from the U.S. Social Security Administration baby-name data. See [Popular Baby Names | SSA](https://www.ssa.gov/oact/babynames/index.html) and [Popular Baby Names data notes | SSA](https://www.ssa.gov/oact/babynames/births.html).
+- `english_words.txt` was sourced from [`words_alpha.txt` in `dwyl/english-words`](https://github.com/dwyl/english-words/blob/master/words_alpha.txt).
+
 The current saved runs in `models/` include:
 
 - `models/english_names/`
@@ -181,10 +186,10 @@ models\
     english_names.model
 ```
 
-Generated out-of-dataset sample files are stored in `results/`:
+Curated result files are stored in `results/`. These lists were manually assembled from generated samples, then filtered to exclude exact matches from the source datasets and sorted. Each file currently contains 1000 entries:
 
-- `results/nonenglish_names.txt`
-- `results/nonenglish_words.txt`
+- `results/nonenglish_names.txt`, generated names not present in `datasets/english_names.txt`
+- `results/nonenglish_words.txt`, generated words not present in `datasets/english_words.txt`
 
 ## JavaScript runtime
 

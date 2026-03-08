@@ -1,5 +1,6 @@
 {
   "name": "phrasedreamgpt",
+  "license": "MIT",
   "scripts": {
     "run-js": "node run_js_bundle.js"
   },
