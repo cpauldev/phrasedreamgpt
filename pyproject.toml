@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "phrasedreamgpt"
+name = "dreamphrasegpt"
 version = "0.1.0"
 description = "A character-level transformer trainer and inference toolkit for newline-delimited text."
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-phrasedreamgpt = "phrasedreamgpt.cli:run"
+dreamphrasegpt = "dreamphrasegpt.cli:run"
 
 [project.optional-dependencies]
 dev = [
@@ -44,4 +44,4 @@ docstring-code-format = true
 py-modules = []
 
 [tool.setuptools.packages.find]
-include = ["phrasedreamgpt*"]
+include = ["dreamphrasegpt*"]

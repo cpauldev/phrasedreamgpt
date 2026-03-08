@@ -9,9 +9,9 @@ from unittest import mock
 
 import torch
 
-from phrasedreamgpt import artifacts, interactive
-from phrasedreamgpt import cli as app
-from phrasedreamgpt.config import (
+from dreamphrasegpt import artifacts, interactive
+from dreamphrasegpt import cli as app
+from dreamphrasegpt.config import (
     Dataset,
     GenerationConfig,
     ModelConfig,
@@ -20,7 +20,7 @@ from phrasedreamgpt.config import (
     TrainingResult,
     format_section_title,
 )
-from phrasedreamgpt.runtime import BatchProvider, build_model
+from dreamphrasegpt.runtime import BatchProvider, build_model
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -194,7 +194,7 @@ class ValidationParityTests(unittest.TestCase):
             "0",
         ]
 
-        with mock.patch("phrasedreamgpt.interactive.prompt_user", side_effect=responses):
+        with mock.patch("dreamphrasegpt.interactive.prompt_user", side_effect=responses):
             prompted_training, prompted_generation, prompted_save = (
                 interactive.prompt_train_settings(
                     training,
@@ -211,7 +211,7 @@ class ValidationParityTests(unittest.TestCase):
 
 class SectionTitleTests(unittest.TestCase):
     def test_product_header_uses_brand_capitalization(self) -> None:
-        self.assertEqual(format_section_title("phrasedreamgpt"), "PhraseDreamGPT")
+        self.assertEqual(format_section_title("dreamphrasegpt"), "DreamPhraseGPT")
 
     def test_lowercase_headers_are_title_cased(self) -> None:
         self.assertEqual(format_section_title("benchmark settings"), "Benchmark Settings")
@@ -235,7 +235,7 @@ class FlowTests(unittest.TestCase):
                 captured_streams.append(dataset.data.tolist())
                 return make_dummy_result(training_config)
 
-            with mock.patch("phrasedreamgpt.cli.train_once", side_effect=fake_train_once):
+            with mock.patch("dreamphrasegpt.cli.train_once", side_effect=fake_train_once):
                 app.run_training_flow(
                     training,
                     generation,

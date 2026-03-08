@@ -1,5 +1,5 @@
 """
-PhraseDreamGPT: train a character-level GPT model from newline-delimited text.
+DreamPhraseGPT: train a character-level GPT model from newline-delimited text.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ MODELS_DIR = Path("models")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train PhraseDreamGPT on character data.")
+    parser = argparse.ArgumentParser(description="Train DreamPhraseGPT on character data.")
     parser.add_argument(
         "--dataset",
         default=None,

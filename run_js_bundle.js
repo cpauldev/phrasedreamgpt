@@ -1,5 +1,5 @@
 /**
- * run_js_bundle.js — run a PhraseDreamGPT JS bundle exported by `phrasedreamgpt.py`
+ * run_js_bundle.js — run a DreamPhraseGPT JS bundle exported by `dreamphrasegpt.py`
  *
  * Usage:
  *   node run_js_bundle.js
@@ -18,7 +18,7 @@ const CONFIG = Object.freeze({
   defaultSamples: 20,
   defaultTemperature: 0.8,
   bundleMagic: "PDBGONNX",
-  bundleFormat: "phrasedreamgpt-onnx-bundle",
+  bundleFormat: "dreamphrasegpt-onnx-bundle",
   bundleVersion: 1,
 });
 
@@ -186,17 +186,17 @@ function loadBundle(bundlePath) {
     bundle = fs.readFileSync(bundlePath);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to read PhraseDreamGPT bundle "${bundlePath}": ${message}`);
+    throw new Error(`Failed to read DreamPhraseGPT bundle "${bundlePath}": ${message}`);
   }
 
   if (bundle.length < CONFIG.bundleMagic.length + 4) {
-    throw new Error(`Corrupt PhraseDreamGPT bundle: ${bundlePath}`);
+    throw new Error(`Corrupt DreamPhraseGPT bundle: ${bundlePath}`);
   }
 
   const magic = bundle.subarray(0, CONFIG.bundleMagic.length).toString("ascii");
 
   if (magic !== CONFIG.bundleMagic) {
-    throw new Error(`Invalid PhraseDreamGPT bundle: ${bundlePath}`);
+    throw new Error(`Invalid DreamPhraseGPT bundle: ${bundlePath}`);
   }
 
   const headerLength = bundle.readUInt32LE(CONFIG.bundleMagic.length);
@@ -204,14 +204,14 @@ function loadBundle(bundlePath) {
   const headerEnd = headerStart + headerLength;
 
   if (headerEnd > bundle.length) {
-    throw new Error(`Corrupt PhraseDreamGPT bundle header: ${bundlePath}`);
+    throw new Error(`Corrupt DreamPhraseGPT bundle header: ${bundlePath}`);
   }
 
   let header;
   try {
     header = JSON.parse(bundle.subarray(headerStart, headerEnd).toString("utf8"));
   } catch {
-    throw new Error(`Corrupt PhraseDreamGPT bundle header JSON: ${bundlePath}`);
+    throw new Error(`Corrupt DreamPhraseGPT bundle header JSON: ${bundlePath}`);
   }
 
   if (header.format !== CONFIG.bundleFormat) {

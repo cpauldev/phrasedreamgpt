@@ -1,5 +1,5 @@
 """
-PhraseDreamGPT package.
+DreamPhraseGPT package.
 """
 
 from __future__ import annotations

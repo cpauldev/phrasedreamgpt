@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 SECTION_TITLE_OVERRIDES = {
-    "phrasedreamgpt": "PhraseDreamGPT",
+    "dreamphrasegpt": "DreamPhraseGPT",
 }
 
 
@@ -95,7 +95,7 @@ RESUME_ARTIFACT_HINT = (
 )
 MODEL_MLP_TYPE = "swiglu"
 JS_BUNDLE_MAGIC = b"PDBGONNX"
-JS_BUNDLE_FORMAT = "phrasedreamgpt-onnx-bundle"
+JS_BUNDLE_FORMAT = "dreamphrasegpt-onnx-bundle"
 JS_BUNDLE_VERSION = 1
 
 

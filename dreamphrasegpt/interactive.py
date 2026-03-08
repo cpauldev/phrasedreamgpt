@@ -281,7 +281,7 @@ def main_menu(
     artifact_manager_runner: Callable[[], None],
 ) -> None:
     while True:
-        print_section("phrasedreamgpt")
+        print_section("dreamphrasegpt")
         print()
         print("1  train")
         print("2  models")

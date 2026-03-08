@@ -1,8 +1,8 @@
-![PhraseDreamGPT banner](assets/phrasedreamgpt.png)
+![DreamPhraseGPT banner](assets/dreamphrasegpt.png)
 
-# PhraseDreamGPT
+# DreamPhraseGPT
 
-`PhraseDreamGPT` trains a character-level transformer on any newline-delimited text file and generates additional strings that follow the character patterns, structure, and common sequences learned from that dataset rather than returning only items from the source list.
+`DreamPhraseGPT` trains a character-level transformer on any newline-delimited text file and generates additional strings that follow the character patterns, structure, and common sequences learned from that dataset rather than returning only items from the source list.
 
 *It supports saved and resumable runs, CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, and a bundled JavaScript runtime.*
 
@@ -22,11 +22,11 @@
 
 ## Use cases
 
-`PhraseDreamGPT` is suited to tasks where short generated text should match the character patterns of a source distribution.
+`DreamPhraseGPT` is suited to tasks where short generated text should match the character patterns of a source distribution.
 
 ##### Research application
 
-`PhraseDreamGPT` can be used to generate and score controlled text inputs for language-model evaluation and interpretability workflows. When trained on a focused dataset such as English words or short structured strings, it can produce realistic made-up words or short text spans that match the style of the source data *without referring to a specific real entity.* This is useful when constructing test inputs for larger models, especially when the goal is to distinguish responses driven by spelling and pattern familiarity from responses driven by memorized knowledge about a real word or entity.
+`DreamPhraseGPT` can be used to generate and score controlled text inputs for language-model evaluation and interpretability workflows. When trained on a focused dataset such as English words or short structured strings, it can produce realistic made-up words or short text spans that match the style of the source data *without referring to a specific real entity.* This is useful when constructing test inputs for larger models, especially when the goal is to distinguish responses driven by spelling and pattern familiarity from responses driven by memorized knowledge about a real word or entity.
 
 This framing is relevant to feature- and circuit-analysis workflows such as:
 
@@ -39,7 +39,7 @@ This framing is relevant to feature- and circuit-analysis workflows such as:
 
 Example workflow:
 
-1. Train `PhraseDreamGPT` on a focused distribution such as English words or short text spans.
+1. Train `DreamPhraseGPT` on a focused distribution such as English words or short text spans.
 1. Generate or score synthetic words — a generated word like `branith` may fit the distribution better than `xqzptl`.
 1. Place those strings into prompt templates with matched controls such as real terms, generated terms, obvious gibberish, or minimal edits.
 1. Run the target language model on those prompts.
@@ -111,7 +111,7 @@ npm install
 Train with the included dataset:
 
 ```powershell
-python phrasedreamgpt.py --dataset english_names.txt
+python dreamphrasegpt.py --dataset english_names.txt
 ```
 
 Run the newest saved JS bundle:
@@ -123,13 +123,13 @@ node run_js_bundle.js
 Open the interactive model manager:
 
 ```powershell
-python phrasedreamgpt.py --models
+python dreamphrasegpt.py --models
 ```
 
 Run a benchmark:
 
 ```powershell
-python phrasedreamgpt.py --compare
+python dreamphrasegpt.py --compare
 ```
 
 ## Datasets
@@ -212,7 +212,7 @@ node run_js_bundle.js models\english_names_2\english_names.model
 Running the script with no arguments opens the main menu:
 
 ```powershell
-python phrasedreamgpt.py
+python dreamphrasegpt.py
 ```
 
 Menu options:
@@ -226,7 +226,7 @@ Menu options:
 Open it with:
 
 ```powershell
-python phrasedreamgpt.py --models
+python dreamphrasegpt.py --models
 ```
 
 The manager lists saved runs in `models/`, sorted by modification time. Standard run folders are shown by run name; nonstandard/manual layouts fall back to a relative path.
@@ -243,15 +243,15 @@ If the `.resume.pt` file is removed, the run remains loadable but is no longer r
 ## Common commands
 
 ```powershell
-python phrasedreamgpt.py --steps 1000
-python phrasedreamgpt.py --dataset mydata.txt --steps 5000 --device cuda --output myrun
-python phrasedreamgpt.py --dataset mydata.txt --no-save
-python phrasedreamgpt.py --models
-python phrasedreamgpt.py --compare --compare-steps 500
+python dreamphrasegpt.py --steps 1000
+python dreamphrasegpt.py --dataset mydata.txt --steps 5000 --device cuda --output myrun
+python dreamphrasegpt.py --dataset mydata.txt --no-save
+python dreamphrasegpt.py --models
+python dreamphrasegpt.py --compare --compare-steps 500
 ```
 
 For the full CLI, run:
 
 ```powershell
-python phrasedreamgpt.py --help
+python dreamphrasegpt.py --help
 ```

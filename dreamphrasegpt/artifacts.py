@@ -420,7 +420,7 @@ def resolve_output_path_arg(path_arg: str, default_dir: Path) -> Path:
 
 
 def resolve_save_paths(
-    save_model_arg: str | None, models_dir: Path, input_stem: str = "phrasedreamgpt"
+    save_model_arg: str | None, models_dir: Path, input_stem: str = "dreamphrasegpt"
 ) -> ArtifactPaths | None:
     if save_model_arg is None:
         return None
@@ -444,7 +444,7 @@ def resolve_resume_save_paths(
     save_model_arg: str | None,
     source_artifact_path: Path,
     models_dir: Path,
-    input_stem: str = "phrasedreamgpt",
+    input_stem: str = "dreamphrasegpt",
 ) -> ArtifactPaths | None:
     if save_model_arg is None:
         return None
