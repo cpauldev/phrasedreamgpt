@@ -19,6 +19,7 @@ const CONFIG = Object.freeze({
   defaultTemperature: 0.8,
   bundleMagic: "PDBGONNX",
   bundleFormat: "phrasedreamgpt-onnx-bundle",
+  bundleVersion: 1,
 });
 
 const USAGE_TEXT = [
@@ -127,7 +128,10 @@ function listBundles(modelsDir) {
     return [];
   }
 
-  return collectBundlePaths(modelsDir).sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+  return collectBundlePaths(modelsDir)
+    .map((bundlePath) => ({ bundlePath, mtimeMs: fs.statSync(bundlePath).mtimeMs }))
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .map(({ bundlePath }) => bundlePath);
 }
 
 function resolveNamedBundle(bundleName) {
@@ -145,7 +149,13 @@ function resolveNamedBundle(bundleName) {
       ].join("\n")
     );
   }
-  return path.resolve(process.cwd(), bundleName);
+
+  throw new Error(
+    [
+      `No JS bundle named "${bundleName}" was found.`,
+      'Pass a full or relative path if the bundle is outside "models/".',
+    ].join("\n")
+  );
 }
 
 function resolveBundlePath(bundlePath) {
@@ -155,7 +165,7 @@ function resolveBundlePath(bundlePath) {
       return directPath;
     }
     if (path.isAbsolute(bundlePath) || bundlePath.includes("/") || bundlePath.includes("\\")) {
-      return directPath;
+      throw new Error(`Bundle not found: ${directPath}`);
     }
     return resolveNamedBundle(bundlePath);
   }
@@ -171,7 +181,14 @@ function resolveBundlePath(bundlePath) {
 }
 
 function loadBundle(bundlePath) {
-  const bundle = fs.readFileSync(bundlePath);
+  let bundle;
+  try {
+    bundle = fs.readFileSync(bundlePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read PhraseDreamGPT bundle "${bundlePath}": ${message}`);
+  }
+
   if (bundle.length < CONFIG.bundleMagic.length + 4) {
     throw new Error(`Corrupt PhraseDreamGPT bundle: ${bundlePath}`);
   }
@@ -190,9 +207,23 @@ function loadBundle(bundlePath) {
     throw new Error(`Corrupt PhraseDreamGPT bundle header: ${bundlePath}`);
   }
 
-  const header = JSON.parse(bundle.subarray(headerStart, headerEnd).toString("utf8"));
+  let header;
+  try {
+    header = JSON.parse(bundle.subarray(headerStart, headerEnd).toString("utf8"));
+  } catch {
+    throw new Error(`Corrupt PhraseDreamGPT bundle header JSON: ${bundlePath}`);
+  }
+
   if (header.format !== CONFIG.bundleFormat) {
     throw new Error(`Unsupported bundle format: ${header.format ?? "<missing>"}`);
+  }
+  if (!Number.isInteger(header.version)) {
+    throw new Error(`Bundle is missing a valid version: ${bundlePath}`);
+  }
+  if (header.version !== CONFIG.bundleVersion) {
+    throw new Error(
+      `Unsupported bundle version ${header.version}. Expected ${CONFIG.bundleVersion}.`
+    );
   }
 
   const modelBytes = bundle.subarray(headerEnd);
@@ -252,9 +283,32 @@ function sampleIndex(probabilities) {
 }
 
 function getLastLogits(logitsTensor, sequenceLength, expectedVocabSize) {
-  const vocabSize = logitsTensor.dims.at(-1);
+  if (logitsTensor === null || typeof logitsTensor !== "object" || !Array.isArray(logitsTensor.dims)) {
+    throw new Error('ONNX session returned an invalid "logits" tensor.');
+  }
+  if (logitsTensor.data === null || typeof logitsTensor.data !== "object" || typeof logitsTensor.data.length !== "number") {
+    throw new Error('ONNX session returned a "logits" tensor without readable data.');
+  }
+
+  const [batchSize, outputSequenceLength, vocabSize] = logitsTensor.dims;
+  if (logitsTensor.dims.length !== 3) {
+    throw new Error(
+      `Unexpected ONNX logits rank ${logitsTensor.dims.length}. Expected 3 dimensions.`
+    );
+  }
+  if (batchSize !== 1) {
+    throw new Error(`Unexpected ONNX batch size ${batchSize}. Expected 1.`);
+  }
+  if (outputSequenceLength !== sequenceLength) {
+    throw new Error(
+      `Unexpected ONNX sequence length ${outputSequenceLength}. Expected ${sequenceLength}.`
+    );
+  }
   if (vocabSize !== expectedVocabSize) {
     throw new Error(`Unexpected ONNX vocab size ${vocabSize}. Expected ${expectedVocabSize}.`);
+  }
+  if (logitsTensor.data.length < sequenceLength * vocabSize) {
+    throw new Error('ONNX session returned an incomplete "logits" tensor.');
   }
 
   const offset = (sequenceLength - 1) * vocabSize;
@@ -270,6 +324,13 @@ async function generateOneName(session, tokenizer, temperature) {
     const window = tokenIds.slice(-blockSize);
     const input = new ort.Tensor("int64", BigInt64Array.from(window.map(BigInt)), [1, window.length]);
     const output = await session.run({ idx: input });
+    if (
+      output === null ||
+      typeof output !== "object" ||
+      !Object.prototype.hasOwnProperty.call(output, "logits")
+    ) {
+      throw new Error('ONNX session output is missing "logits".');
+    }
     const logits = getLastLogits(output.logits, window.length, vocabSize);
     const probabilities = softmax(logits, temperature);
     const tokenId = sampleIndex(probabilities);
