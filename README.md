@@ -6,8 +6,6 @@
 
 *It supports saved and resumable runs, CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, and a bundled JavaScript runtime.*
 
-Primary script: `phrasedreamgpt.py`
-
 ## Table of contents
 
 - [Use cases](#use-cases)
@@ -146,11 +144,6 @@ Dataset sources:
 - `english_names.txt` was flattened and deduplicated from the U.S. Social Security Administration baby-name data. See [Popular Baby Names | SSA](https://www.ssa.gov/oact/babynames/index.html) and [Popular Baby Names data notes | SSA](https://www.ssa.gov/oact/babynames/births.html).
 - `english_words.txt` was sourced from [`words_alpha.txt` in `dwyl/english-words`](https://github.com/dwyl/english-words/blob/master/words_alpha.txt).
 
-The current saved runs in `models/` include:
-
-- `models/english_names/`
-- `models/english_words/`
-
 To use your own dataset:
 
 - Place a `.txt` file in `datasets/`
@@ -160,7 +153,7 @@ To use your own dataset:
 
 ## Saved runs
 
-Saving and resuming write a run folder in `models/` with three files:
+A standard saved run contains three files:
 
 | File         | Purpose                                                                                                                               | Needed later              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
@@ -174,6 +167,7 @@ Default save behavior:
 - By default, a run based on `mydata.txt` is saved to `models/mydata/`.
 - If that folder already exists, the next run becomes `models/mydata_2/`, then `_3`, and so on.
 - Use `--output my_run` to save to `models/my_run/`.
+- Use `--output PATH` for a custom relative or absolute save path.
 - Use `--no-save` to skip writing artifacts.
 
 Example:
