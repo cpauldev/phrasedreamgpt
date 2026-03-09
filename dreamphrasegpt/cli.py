@@ -53,6 +53,7 @@ from .runtime import (
     seed_everything,
     train_once,
 )
+from .source_filter import BloomSourceFilter, resolve_source_filter
 
 DATASETS_DIR = Path("datasets")
 MODELS_DIR = Path("models")
@@ -355,6 +356,7 @@ def maybe_print_samples(
     device: torch.device,
     generation_config: GenerationConfig,
     *,
+    source_filter: BloomSourceFilter | None,
     should_generate: bool,
 ) -> None:
     if not should_generate:
@@ -368,11 +370,19 @@ def maybe_print_samples(
         print(warning)
 
     print_section("samples")
+    if source_filter is None and dataset.data.numel() == 0:
+        fail(
+            "This artifact does not include source filter metadata.",
+            "Resave or regenerate the model with this DreamPhraseGPT version before generating.",
+        )
+    resolved_source_filter = resolve_source_filter(dataset, source_filter)
+
     samples = generate_samples(
         model,
         dataset,
         device,
         replace(generation_config, requested_block_size=block_size),
+        source_filter=resolved_source_filter,
     )
     for index, text in enumerate(samples, start=1):
         print(f"{index:2d}  {text}")
@@ -398,6 +408,7 @@ def run_training_flow(
     device = resolve_device(bound_training.requested_device)
     result = train_once(bound_training, dataset, device)
     print_training_summary(result)
+    source_filter = resolve_source_filter(dataset)
 
     artifact_paths = resolve_save_paths(
         save_arg, models_dir, Path(training_config.dataset_path).stem
@@ -414,6 +425,7 @@ def run_training_flow(
             result.total_tokens,
             result.final_loss,
             artifact_paths,
+            source_filter=source_filter,
         )
         print_saved_artifact_paths(saved_paths, updated=False)
 
@@ -422,6 +434,7 @@ def run_training_flow(
         dataset,
         device,
         replace(generation_config, requested_block_size=bound_training.model.block_size),
+        source_filter=source_filter,
         should_generate=should_generate,
     )
 
@@ -475,6 +488,7 @@ def run_artifact_inference_flow(
         bundle.dataset,
         device,
         generation_config,
+        source_filter=bundle.source_filter,
         should_generate=should_generate,
     )
 
@@ -498,6 +512,7 @@ def run_resume_flow(
 
     result = train_once(resolved_training, bundle.dataset, device, resume_bundle=bundle)
     print_training_summary(result)
+    source_filter = resolve_source_filter(bundle.dataset, bundle.source_filter)
 
     input_stem = (
         Path(resolved_training.dataset_path).stem
@@ -517,6 +532,7 @@ def run_resume_flow(
             result.total_tokens,
             result.final_loss,
             save_paths,
+            source_filter=source_filter,
         )
         print_saved_artifact_paths(saved_paths, updated=save_arg == "auto")
 
@@ -525,6 +541,7 @@ def run_resume_flow(
         bundle.dataset,
         device,
         replace(generation_config, requested_block_size=resolved_training.model.block_size),
+        source_filter=source_filter,
         should_generate=should_generate,
     )
 

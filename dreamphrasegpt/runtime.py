@@ -23,6 +23,7 @@ from .config import (
     fail,
     print_section,
 )
+from .source_filter import DEFAULT_SOURCE_FILTER_MAX_RETRIES, BloomSourceFilter
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactBundle
@@ -660,7 +661,10 @@ def train_once(
 
         with autocast_context(device, precision):
             logits = model(xb)
-            loss = F.cross_entropy(logits.view(-1, dataset.vocab_size), yb.reshape(-1))
+            loss = F.cross_entropy(
+                logits.view(-1, dataset.vocab_size),
+                yb.reshape(-1),
+            )
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -707,31 +711,56 @@ def train_once(
 
 
 @torch.no_grad()
+def generate_sample_once(
+    model: nn.Module,
+    dataset: Dataset,
+    device: torch.device,
+    generation_config: GenerationConfig,
+) -> str:
+    idx = torch.tensor([[dataset.bos_id]], dtype=torch.long, device=device)
+    chars: list[str] = []
+
+    for _ in range(generation_config.requested_block_size):
+        logits = model(idx[:, -generation_config.requested_block_size :])
+        next_logits = logits[:, -1, :] / generation_config.temperature
+        probs = F.softmax(next_logits, dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1)
+        token = int(next_id.item())
+        if token == dataset.bos_id:
+            break
+        chars.append(dataset.id_to_char[token])
+        idx = torch.cat((idx, next_id), dim=1)
+
+    return "".join(chars)
+
+
+@torch.no_grad()
 def generate_samples(
     model: nn.Module,
     dataset: Dataset,
     device: torch.device,
     generation_config: GenerationConfig,
+    *,
+    source_filter: BloomSourceFilter | None = None,
 ) -> list[str]:
     model.eval()
     samples: list[str] = []
 
     for _ in range(generation_config.num_samples):
-        idx = torch.tensor([[dataset.bos_id]], dtype=torch.long, device=device)
-        chars: list[str] = []
-
-        for _ in range(generation_config.requested_block_size):
-            logits = model(idx[:, -generation_config.requested_block_size :])
-            next_logits = logits[:, -1, :] / generation_config.temperature
-            probs = F.softmax(next_logits, dim=-1)
-            next_id = torch.multinomial(probs, num_samples=1)
-            token = int(next_id.item())
-            if token == dataset.bos_id:
+        for _ in range(DEFAULT_SOURCE_FILTER_MAX_RETRIES):
+            sample = generate_sample_once(model, dataset, device, generation_config)
+            if source_filter is None or not source_filter.matches(sample):
+                samples.append(sample)
                 break
-            chars.append(dataset.id_to_char[token])
-            idx = torch.cat((idx, next_id), dim=1)
-
-        samples.append("".join(chars))
+        else:
+            fail(
+                "Failed to sample a non-source line within the retry limit.",
+                (
+                    f"Increase --temperature, train for fewer steps, "
+                    "or resave the model. The fixed retry limit is "
+                    f"{DEFAULT_SOURCE_FILTER_MAX_RETRIES} attempts."
+                ),
+            )
 
     return samples
 

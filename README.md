@@ -2,33 +2,35 @@
 
 # DreamPhraseGPT
 
-`DreamPhraseGPT` trains a character-level transformer on any newline-delimited text file and generates additional strings that follow the character patterns, structure, and common sequences learned from that dataset rather than returning only items from the source list.
+`DreamPhraseGPT` trains a character-level transformer on any newline-delimited text file and can generate additional strings that follow the character patterns, structure, and common sequences learned from that dataset.
 
-*It supports saved and resumable runs, CPU, NVIDIA CUDA, and Apple Silicon / Metal Performance Shaders (MPS) execution, and a bundled JavaScript runtime.*
+Example outputs trained on English words include `glossoscope`, `heartways`, `bulletine`, `joulemaker`, `braqueousness`, `chlorosiphon`, `langeling`, `margariums`, `outtravelers`, and `zamoralize`.
+
+Example outputs trained on U.S. baby names include `Miryella`, `Beliana`, `Camiliah`, `Cheraine`, `Leeandro`, `Eivyn`, `Franceline`, `Jadiza`, `Dejanell`, and `Zalinda`.
+
+*It supports saved and resumable runs, CPU, CUDA, Apple Silicon / MPS, and a bundled JavaScript runtime.*
 
 ## Table of contents
 
 - [Use cases](#use-cases)
 - [Requirements](#requirements)
-- [Architecture and training](#architecture-and-training)
 - [Setup](#setup)
 - [Quick start](#quick-start)
-- [Datasets](#datasets)
 - [Saved runs](#saved-runs)
-- [JavaScript runtime](#javascript-runtime)
-- [Interactive menu](#interactive-menu)
+- [Datasets](#datasets)
 - [Artifact manager](#artifact-manager)
 - [Common commands](#common-commands)
+- [Architecture and training](#architecture-and-training)
 
 ## Use cases
 
 `DreamPhraseGPT` is suited to tasks where short generated text should match the character patterns of a source distribution.
 
-##### Research application
+### Research application
 
-`DreamPhraseGPT` can be used to generate and score controlled text inputs for language-model evaluation and interpretability workflows. When trained on a focused dataset such as English words or short structured strings, it can produce realistic made-up words or short text spans that match the style of the source data *without referring to a specific real entity.* This is useful when constructing test inputs for larger models, especially when the goal is to distinguish responses driven by spelling and pattern familiarity from responses driven by memorized knowledge about a real word or entity.
+`DreamPhraseGPT` can generate and score controlled inputs for language-model evaluation and interpretability. Trained on focused data such as English words or short structured strings, it can produce realistic made-up words or short spans in the same style *without pointing to a specific real entity.* This helps separate responses driven by spelling and pattern familiarity from responses driven by prior exposure to a real word or entity.
 
-This framing is relevant to feature- and circuit-analysis workflows such as:
+This is relevant to feature- and circuit-analysis workflows such as:
 
 - Entity recognition and unfamiliar-entity handling
 - Hallucination studies
@@ -51,9 +53,9 @@ Related interpretability research from Anthropic includes:
 - [Scaling Monosemanticity: Extracting Interpretable Features from Claude 3 Sonnet](https://transformer-circuits.pub/2024/scaling-monosemanticity/index.html)
 - [On the Biology of a Large Language Model](https://transformer-circuits.pub/2025/attribution-graphs/biology.html)
 
-The same setup can also be used for candidate scoring or filtering based on how well a string fits the training distribution.
+It can also score or filter candidates by how well they fit the training distribution.
 
-##### General application
+### General application
 
 - Procedural content such as place names, species names, fictional languages, or other structured short-form text
 - Baby names based on regional, cultural, or stylistic name lists
@@ -68,19 +70,6 @@ The same setup can also be used for candidate scoring or filtering based on how 
 - Optional: CUDA for `--device cuda`
 - Optional: Apple Silicon / MPS for `--device mps`
 - Optional: `triton` support if you want CUDA compile mode
-
-## Architecture and training
-
-The model is a decoder-only, character-level GPT. It uses:
-
-- Causal self-attention in the style of [Attention Is All You Need](https://arxiv.org/abs/1706.03762), implemented with [`torch.nn.functional.scaled_dot_product_attention`](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
-- [RMSNorm](https://arxiv.org/abs/1910.07467)
-- [SwiGLU](https://arxiv.org/abs/2002.05202) feed-forward layers
-- [AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
-- Linear learning-rate decay over the configured training steps
-- Optional CUDA AMP for mixed-precision training
-- Optional [`torch.compile`](https://pytorch.org/docs/stable/generated/torch.compile.html) on CUDA when Triton and the runtime support it
-- Bundled ONNX export for Node.js inference through [`onnxruntime-node`](https://www.npmjs.com/package/onnxruntime-node)
 
 ## Setup
 
@@ -108,52 +97,45 @@ npm install
 
 ## Quick start
 
-Train with the included dataset:
+Start with the main menu:
 
 ```powershell
-python dreamphrasegpt.py --dataset english_names.txt
+python dreamphrasegpt.py
 ```
 
-Run the newest saved JS bundle:
+Main menu options:
 
-```powershell
-node run_js_bundle.js
-```
+- `train` prompts for dataset and training settings
+- `models` opens the saved run manager
+- `benchmark` compares CPU with the detected accelerator
 
-Open the interactive model manager:
+Other common entry points:
 
-```powershell
-python dreamphrasegpt.py --models
-```
+| Goal                               | Command                                                |
+| ---------------------------------- | ------------------------------------------------------ |
+| Train with the included dataset    | `python dreamphrasegpt.py --dataset us_baby_names.txt` |
+| Open the artifact manager directly | `python dreamphrasegpt.py --models`                    |
+| Run a benchmark                    | `python dreamphrasegpt.py --compare`                   |
+| Run the newest saved JS bundle     | `node run_js_bundle.js`                                |
 
-Run a benchmark:
+Included example outputs:
 
-```powershell
-python dreamphrasegpt.py --compare
-```
-
-## Datasets
-
-The repository includes:
-
-- `datasets/english_names.txt`, a newline-delimited list of names
-- `datasets/english_words.txt`, a newline-delimited list of English words
-
-Dataset sources:
-
-- `english_names.txt` was flattened and deduplicated from the U.S. Social Security Administration baby-name data. See [Popular Baby Names | SSA](https://www.ssa.gov/oact/babynames/index.html) and [Popular Baby Names data notes | SSA](https://www.ssa.gov/oact/babynames/births.html).
-- `english_words.txt` was sourced from [`words_alpha.txt` in `dwyl/english-words`](https://github.com/dwyl/english-words/blob/master/words_alpha.txt).
-
-To use your own dataset:
-
-- Place a `.txt` file in `datasets/`
-- Use one sample per line
-- Pass `--dataset PATH` to choose a specific file
-- Bare file names such as `--dataset english_names.txt` resolve inside `datasets/`
+- `results/non_us_baby_names.txt`, 1000 deduplicated, sorted generated names with exact source matches removed
+- `results/nonenglish_words.txt`, 1000 deduplicated, sorted generated words with exact source matches removed
 
 ## Saved runs
 
-A standard saved run contains three files:
+A standard saved run looks like:
+
+```text
+models\
+  us_baby_names\
+    us_baby_names.model.pt
+    us_baby_names.resume.pt
+    us_baby_names.model
+```
+
+It contains three files:
 
 | File         | Purpose                                                                                                                               | Needed later              |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
@@ -161,65 +143,45 @@ A standard saved run contains three files:
 | `.resume.pt` | Resume companion data with dataset snapshot, optimizer state, scaler state, resume state, and RNG state.                              | Only for exact resume     |
 | `.model`     | JavaScript bundle for `run_js_bundle.js`.                                                                                             | Only for JS inference     |
 
-Default save behavior:
+By default:
 
 - Training and resume save automatically.
-- By default, a run based on `mydata.txt` is saved to `models/mydata/`.
+- A run based on `mydata.txt` is saved to `models/mydata/`.
 - If that folder already exists, the next run becomes `models/mydata_2/`, then `_3`, and so on.
 - Use `--output my_run` to save to `models/my_run/`.
 - Use `--output PATH` for a custom relative or absolute save path.
 - Use `--no-save` to skip writing artifacts.
 
-Example:
+JavaScript bundle notes:
 
-```text
-models\
-  english_names\
-    english_names.model.pt
-    english_names.resume.pt
-    english_names.model
-```
+- Bundles with embedded source-filter metadata reject exact source-line matches automatically.
+- If more than one saved run contains the same bundle file name, pass a relative or full path such as `models\us_baby_names_2\us_baby_names.model`.
 
-Curated result files are stored in `results/`. These lists were manually assembled from generated samples, then filtered to exclude exact matches from the source datasets and sorted. Each file currently contains 1000 entries:
-
-- `results/nonenglish_names.txt`, generated names not present in `datasets/english_names.txt`
-- `results/nonenglish_words.txt`, generated words not present in `datasets/english_words.txt`
-
-## JavaScript runtime
-
-Saving or resuming already writes the JS bundle automatically.
-
-Run the newest bundle:
+Examples:
 
 ```powershell
-node run_js_bundle.js
+node run_js_bundle.js us_baby_names.model --samples 40 --temperature 0.7
+node run_js_bundle.js models\us_baby_names_2\us_baby_names.model
 ```
 
-Run a specific bundle by file name:
+## Datasets
 
-```powershell
-node run_js_bundle.js english_names.model --samples 40 --temperature 0.7
-```
+The repository includes:
 
-If more than one saved run contains the same bundle file name, pass a relative or full path instead:
+- `datasets/us_baby_names.txt`, a newline-delimited list of U.S. baby names
+- `datasets/english_words.txt`, a newline-delimited list of English words
 
-```powershell
-node run_js_bundle.js models\english_names_2\english_names.model
-```
+Dataset sources:
 
-## Interactive menu
+- `us_baby_names.txt` was flattened and deduplicated from U.S. Social Security Administration baby-name data. See [Popular Baby Names | SSA](https://www.ssa.gov/oact/babynames/index.html) and [Popular Baby Names data notes | SSA](https://www.ssa.gov/oact/babynames/births.html).
+- `english_words.txt` was sourced from [`words_alpha.txt` in `dwyl/english-words`](https://github.com/dwyl/english-words/blob/master/words_alpha.txt).
 
-Running the script with no arguments opens the main menu:
+To use your own dataset:
 
-```powershell
-python dreamphrasegpt.py
-```
-
-Menu options:
-
-- `train` prompts for dataset and training settings
-- `models` opens the saved run manager
-- `benchmark` compares CPU with the detected accelerator
+- Place a `.txt` file in `datasets/`
+- Use one sample per line
+- Pass `--dataset PATH` to choose a specific file
+- Bare file names such as `--dataset us_baby_names.txt` resolve inside `datasets/`
 
 ## Artifact manager
 
@@ -229,7 +191,7 @@ Open it with:
 python dreamphrasegpt.py --models
 ```
 
-The manager lists saved runs in `models/`, sorted by modification time. Standard run folders are shown by run name; nonstandard/manual layouts fall back to a relative path.
+The manager lists saved runs in `models/` by modification time. Standard run folders are shown by run name; other layouts use a relative path.
 
 Available actions:
 
@@ -238,7 +200,7 @@ Available actions:
 - `Inspect` prints artifact details
 - `Delete` removes the selected model artifact and its companion files
 
-If the `.resume.pt` file is removed, the run remains loadable but is no longer resumable.
+If the `.resume.pt` file is removed, the run can still be loaded but can no longer be resumed.
 
 ## Common commands
 
@@ -255,3 +217,19 @@ For the full CLI, run:
 ```powershell
 python dreamphrasegpt.py --help
 ```
+
+## Architecture and training
+
+The model is a decoder-only, character-level GPT. It uses:
+
+- Causal self-attention in the style of [Attention Is All You Need](https://arxiv.org/abs/1706.03762), implemented with [`torch.nn.functional.scaled_dot_product_attention`](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+- [RMSNorm](https://arxiv.org/abs/1910.07467)
+- [SwiGLU](https://arxiv.org/abs/2002.05202) feed-forward layers
+- [AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
+- Linear learning-rate decay over the configured training steps
+- Optional CUDA AMP for mixed-precision training
+- Optional [`torch.compile`](https://pytorch.org/docs/stable/generated/torch.compile.html) on CUDA when Triton and the runtime support it
+- Built-in artifact-embedded Bloom filter that rejects exact source-line matches at generation time
+- Bundled ONNX export for Node.js inference through [`onnxruntime-node`](https://www.npmjs.com/package/onnxruntime-node)
+
+For small newline-delimited datasets, shorter training runs usually preserve novelty better. The embedded Bloom filter blocks exact source matches, though false positives can occasionally reject a novel output.

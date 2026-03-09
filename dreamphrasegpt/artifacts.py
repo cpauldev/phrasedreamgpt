@@ -35,6 +35,11 @@ from .config import (
     print_section,
 )
 from .runtime import build_model, capture_rng_state, unwrap_model
+from .source_filter import (
+    BloomSourceFilter,
+    bloom_filter_from_mapping,
+    resolve_source_filter,
+)
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,7 @@ class ArtifactBundle:
     dataset: Dataset
     state_dict: dict
     artifact_type: str
+    source_filter: BloomSourceFilter | None
     training_metadata: dict
     resume_state: dict
     optimizer_state: dict
@@ -687,6 +693,7 @@ def build_artifact_bundle(artifact_path: Path, artifact: dict) -> ArtifactBundle
             artifact_path=artifact_path,
         ),
         artifact_type=describe_artifact_type(artifact),
+        source_filter=bloom_filter_from_mapping(artifact.get("source_filter")),
         training_metadata=artifact.get("training_config", {}),
         resume_state=artifact.get("resume_state", {}),
         optimizer_state=artifact.get("optimizer_state", {}),
@@ -849,8 +856,11 @@ def build_training_checkpoint(
     completed_steps: int,
     total_tokens: int,
     final_loss: float,
+    *,
+    source_filter: BloomSourceFilter | None = None,
 ) -> dict:
     raw_model = unwrap_model(model)
+    resolved_source_filter = resolve_source_filter(dataset, source_filter)
     return {
         "format_version": 1,
         "checkpoint_type": "resume",
@@ -873,10 +883,6 @@ def build_training_checkpoint(
             "beta2": training_config.beta2,
             "eps": training_config.eps,
             "weight_decay": training_config.weight_decay,
-            "device": training_config.requested_device,
-            "dtype": training_config.requested_dtype,
-            "amp": training_config.amp_requested,
-            "compile": training_config.compile_requested,
             "requested_device": runtime.requested_device,
             "resolved_device": runtime.resolved_device,
             "requested_dtype": runtime.requested_dtype,
@@ -891,6 +897,7 @@ def build_training_checkpoint(
             "total_tokens": total_tokens,
             "final_loss": final_loss,
         },
+        "source_filter": resolved_source_filter.to_artifact_dict(),
         "state_dict": raw_model.state_dict(),
         "optimizer_state": optimizer_state,
         "scaler_state": scaler_state,
@@ -913,6 +920,7 @@ def build_model_artifact(source_checkpoint: dict, source_path: Path | None = Non
         ),
         "model_config": source_checkpoint["model_config"],
         "tokenizer": source_checkpoint["tokenizer"],
+        "source_filter": source_checkpoint.get("source_filter"),
         "state_dict": source_checkpoint["state_dict"],
     }
     if source_path is not None:
@@ -932,6 +940,7 @@ def build_resume_artifact(source_checkpoint: dict, source_path: Path | None = No
         "optimizer_state": source_checkpoint["optimizer_state"],
         "scaler_state": source_checkpoint.get("scaler_state"),
         "resume_state": source_checkpoint["resume_state"],
+        "source_filter": source_checkpoint.get("source_filter"),
         "rng_state": source_checkpoint["rng_state"],
     }
     if source_path is not None:
@@ -940,7 +949,11 @@ def build_resume_artifact(source_checkpoint: dict, source_path: Path | None = No
 
 
 def build_js_bundle_bytes(
-    *, onnx_bytes: bytes, tokenizer: dict[str, object], source_path: Path
+    *,
+    onnx_bytes: bytes,
+    tokenizer: dict[str, object],
+    source_path: Path,
+    source_filter: BloomSourceFilter,
 ) -> bytes:
     header = {
         "format": JS_BUNDLE_FORMAT,
@@ -948,6 +961,7 @@ def build_js_bundle_bytes(
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "source_artifact": str(source_path),
         "tokenizer": tokenizer,
+        "source_filter": source_filter.to_json_dict(),
     }
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     return JS_BUNDLE_MAGIC + struct.pack("<I", len(header_bytes)) + header_bytes + onnx_bytes
@@ -960,6 +974,7 @@ def export_js_model_bundle_from_model(
     *,
     source_path: Path,
     model_config: ModelConfig,
+    source_filter: BloomSourceFilter | None = None,
 ) -> Path:
     ensure_utf8_stdio()
     raw_model = build_model(
@@ -993,6 +1008,8 @@ def export_js_model_bundle_from_model(
                 opset_version=18,
             )
 
+        resolved_source_filter = resolve_source_filter(dataset, source_filter)
+
         bundle_bytes = build_js_bundle_bytes(
             onnx_bytes=temp_onnx_path.read_bytes(),
             tokenizer={
@@ -1002,6 +1019,7 @@ def export_js_model_bundle_from_model(
                 "block_size": model_config.block_size,
             },
             source_path=source_path,
+            source_filter=resolved_source_filter,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(bundle_bytes)
@@ -1025,6 +1043,7 @@ def export_js_model_bundle(
         output_path,
         source_path=source_artifact_path or source_path,
         model_config=bundle.model_config,
+        source_filter=bundle.source_filter,
     )
 
 
@@ -1039,6 +1058,8 @@ def save_artifact_set(
     total_tokens: int,
     final_loss: float,
     artifact_paths: ArtifactPaths,
+    *,
+    source_filter: BloomSourceFilter | None = None,
 ) -> ArtifactPaths:
     checkpoint = build_training_checkpoint(
         model,
@@ -1050,6 +1071,7 @@ def save_artifact_set(
         completed_steps,
         total_tokens,
         final_loss,
+        source_filter=source_filter,
     )
     ensure_artifact_directory_safe(artifact_paths)
     staging_dir = create_staging_directory(artifact_paths.directory)
@@ -1097,15 +1119,14 @@ def resolve_resume_training_config(
         weight_decay=float(training_metadata["weight_decay"]),
         requested_device=user_training_config.requested_device,
         requested_dtype=training_metadata.get(
-            "requested_dtype",
-            training_metadata.get("dtype", user_training_config.requested_dtype),
+            "requested_dtype", user_training_config.requested_dtype
         ),
         amp_requested=training_metadata.get(
-            "amp_requested", training_metadata.get("amp", user_training_config.amp_requested)
+            "amp_requested",
+            user_training_config.amp_requested,
         ),
         compile_requested=training_metadata.get(
-            "compile_requested",
-            training_metadata.get("compile", user_training_config.compile_requested),
+            "compile_requested", user_training_config.compile_requested
         ),
         print_every=user_training_config.print_every,
     )
@@ -1194,14 +1215,14 @@ def _print_artifact_training_sections(bundle: ArtifactBundle) -> None:
 
     print_section("runtime")
     width = len("compile")
-    req_device = training_config.get("requested_device", training_config.get("device", "unknown"))
+    req_device = training_config.get("requested_device", "unknown")
     eff_device = training_config.get("resolved_device")
     device_str = eff_device or req_device
     if eff_device is not None and eff_device != req_device:
         device_str = f"{eff_device}  ({req_device})"
     _print_row("device", device_str, width)
 
-    req_amp = training_config.get("amp_requested", training_config.get("amp", "unknown"))
+    req_amp = training_config.get("amp_requested", "unknown")
     amp_enabled = training_config.get("amp_enabled")
     amp_dtype = training_config.get("amp_dtype")
     if amp_enabled is not None:
@@ -1213,9 +1234,7 @@ def _print_artifact_training_sections(bundle: ArtifactBundle) -> None:
         amp_str = str(req_amp)
     _print_row("amp", amp_str, width)
 
-    req_compile = training_config.get(
-        "compile_requested", training_config.get("compile", "unknown")
-    )
+    req_compile = training_config.get("compile_requested", "unknown")
     compile_enabled = training_config.get("compile_enabled")
     if compile_enabled is not None:
         compile_str = f"{'on' if compile_enabled else 'off'}  (requested {req_compile})"
@@ -1254,6 +1273,8 @@ def _print_artifact_summary_section(bundle: ArtifactBundle) -> None:
         "yes" if artifact_supports_exact_resume(bundle.raw_artifact) else "no",
         width,
     )
+    if bundle.source_filter is not None:
+        _print_row("src filter", f"bloom ({bundle.source_filter.byte_count} B)", width)
     _print_row("tensors", len(bundle.state_dict), width)
 
 

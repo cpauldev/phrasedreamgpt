@@ -11,6 +11,7 @@ import torch
 
 from dreamphrasegpt import artifacts, interactive
 from dreamphrasegpt import cli as app
+from dreamphrasegpt import runtime as runtime_module
 from dreamphrasegpt.config import (
     Dataset,
     GenerationConfig,
@@ -21,6 +22,7 @@ from dreamphrasegpt.config import (
     format_section_title,
 )
 from dreamphrasegpt.runtime import BatchProvider, build_model
+from dreamphrasegpt.source_filter import build_bloom_source_filter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -168,6 +170,17 @@ class ValidationParityTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             app.validate_args(args)
 
+    def test_cli_rejects_removed_novelty_flags(self) -> None:
+        parser = app.build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--label-smoothing", "0.2"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--loss-drop-prob", "0.2"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--reject-source-matches"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--max-retries-per-sample", "10"])
+
     def test_interactive_prompt_retries_invalid_embedding_head_combo(self) -> None:
         training = make_training_config(dataset_path="dataset.txt")
         generation = make_generation_config()
@@ -268,6 +281,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn((0, 1, 2, 3), windows)
         self.assertIn((1, 2, 3, 4), windows)
 
+    def test_generate_samples_retries_source_matches(self) -> None:
+        dataset = Dataset(
+            data=torch.tensor([2, 0, 1, 2], dtype=torch.long),
+            id_to_char=["a", "b"],
+            bos_id=2,
+            vocab_size=3,
+        )
+        generation = GenerationConfig(
+            num_samples=1,
+            temperature=1.0,
+            requested_block_size=4,
+        )
+        source_filter = build_bloom_source_filter(["ab"])
+
+        with mock.patch(
+            "dreamphrasegpt.runtime.generate_sample_once",
+            side_effect=["ab", "aba"],
+        ):
+            samples = runtime_module.generate_samples(
+                mock.Mock(),
+                dataset,
+                torch.device("cpu"),
+                generation,
+                source_filter=source_filter,
+            )
+
+        self.assertEqual(samples, ["aba"])
+
 
 class ArtifactTests(unittest.TestCase):
     def test_inference_policy_ignores_resume_companion_payload(self) -> None:
@@ -286,6 +327,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(inference_bundle.training_metadata, {})
         self.assertGreater(resume_bundle.dataset.data.numel(), 0)
         self.assertIn("optimizer_state", resume_bundle.raw_artifact)
+        self.assertIsNotNone(inference_bundle.source_filter)
+        self.assertTrue(inference_bundle.source_filter.matches("ab"))
 
     def test_resume_only_artifact_loads_companion_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -298,6 +341,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("state_dict", bundle.raw_artifact)
         self.assertGreater(bundle.dataset.data.numel(), 0)
         self.assertIn("completed_steps", bundle.resume_state)
+        self.assertIsNotNone(bundle.source_filter)
 
     def test_combined_artifact_loads_in_one_step(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -309,6 +353,7 @@ class ArtifactTests(unittest.TestCase):
 
         self.assertIn("optimizer_state", bundle.raw_artifact)
         self.assertIn("state_dict", bundle.raw_artifact)
+        self.assertIsNotNone(bundle.source_filter)
 
     def test_corrupt_artifact_fails_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
