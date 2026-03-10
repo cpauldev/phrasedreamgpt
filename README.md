@@ -2,7 +2,9 @@
 
 # DreamPhraseGPT
 
-`DreamPhraseGPT` trains a character-level transformer on any newline-delimited text file and can generate additional strings that follow the character patterns, structure, and common sequences learned from that dataset.
+`DreamPhraseGPT` trains a character-level transformer on any newline-delimited text file and can generate strings that follow the character patterns, structure, and common sequences learned from that dataset.
+
+[Live demo](https://cpauldev.github.io/dreamphrase-gpt/)
 
 Example outputs trained on English words include `glossoscope`, `heartways`, `bulletine`, `joulemaker`, `braqueousness`, `chlorosiphon`, `langeling`, `margariums`, `outtravelers`, and `zamoralize`.
 
@@ -16,6 +18,7 @@ Example outputs trained on U.S. baby names include `Miryella`, `Beliana`, `Camil
 - [Requirements](#requirements)
 - [Setup](#setup)
 - [Quick start](#quick-start)
+- [Website](#website)
 - [Saved runs](#saved-runs)
 - [Datasets](#datasets)
 - [Artifact manager](#artifact-manager)
@@ -100,7 +103,7 @@ npm install
 Start with the main menu:
 
 ```powershell
-python dreamphrasegpt.py
+python -m dreamphrasegpt
 ```
 
 Main menu options:
@@ -113,15 +116,36 @@ Other common entry points:
 
 | Goal                               | Command                                                |
 | ---------------------------------- | ------------------------------------------------------ |
-| Train with the included dataset    | `python dreamphrasegpt.py --dataset us_baby_names.txt` |
-| Open the artifact manager directly | `python dreamphrasegpt.py --models`                    |
-| Run a benchmark                    | `python dreamphrasegpt.py --compare`                   |
-| Run the newest saved JS bundle     | `node run_js_bundle.js`                                |
+| Train with the included dataset    | `python -m dreamphrasegpt --dataset us_baby_names.txt` |
+| Open the artifact manager directly | `python -m dreamphrasegpt --models`                    |
+| Run a benchmark                    | `python -m dreamphrasegpt --compare`                   |
+| Run the newest saved JS bundle     | `node scripts/run_js_bundle.js`                        |
 
 Included example outputs:
 
 - `results/non_us_baby_names.txt`, 1000 deduplicated, sorted generated names with exact source matches removed
 - `results/nonenglish_words.txt`, 1000 deduplicated, sorted generated words with exact source matches removed
+
+## Website
+
+The browser app lives in `site/`.
+
+Run it locally:
+
+```powershell
+cd site
+npm install
+npm run dev
+```
+
+Build the static site:
+
+```powershell
+cd site
+npm run build
+```
+
+GitHub Pages deployment is configured with `.github/workflows/deploy-pages.yml`. After pushing to `main`, set the repository Pages source to `GitHub Actions`.
 
 ## Saved runs
 
@@ -141,7 +165,7 @@ It contains three files:
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | `.model.pt`  | Primary PyTorch artifact with model weights and tokenizer. This is the file the manager lists and the file used for Python inference. | Yes, for Python inference |
 | `.resume.pt` | Resume companion data with dataset snapshot, optimizer state, scaler state, resume state, and RNG state.                              | Only for exact resume     |
-| `.model`     | JavaScript bundle for `run_js_bundle.js`.                                                                                             | Only for JS inference     |
+| `.model`     | JavaScript bundle for `scripts/run_js_bundle.js`.                                                                                     | Only for JS inference     |
 
 By default:
 
@@ -160,8 +184,8 @@ JavaScript bundle notes:
 Examples:
 
 ```powershell
-node run_js_bundle.js us_baby_names.model --samples 40 --temperature 0.7
-node run_js_bundle.js models\us_baby_names_2\us_baby_names.model
+node scripts/run_js_bundle.js us_baby_names.model --samples 40 --temperature 0.7
+node scripts/run_js_bundle.js models\us_baby_names_2\us_baby_names.model
 ```
 
 ## Datasets
@@ -188,7 +212,7 @@ To use your own dataset:
 Open it with:
 
 ```powershell
-python dreamphrasegpt.py --models
+python -m dreamphrasegpt --models
 ```
 
 The manager lists saved runs in `models/` by modification time. Standard run folders are shown by run name; other layouts use a relative path.
@@ -205,17 +229,17 @@ If the `.resume.pt` file is removed, the run can still be loaded but can no long
 ## Common commands
 
 ```powershell
-python dreamphrasegpt.py --steps 1000
-python dreamphrasegpt.py --dataset mydata.txt --steps 5000 --device cuda --output myrun
-python dreamphrasegpt.py --dataset mydata.txt --no-save
-python dreamphrasegpt.py --models
-python dreamphrasegpt.py --compare --compare-steps 500
+python -m dreamphrasegpt --steps 1000
+python -m dreamphrasegpt --dataset mydata.txt --steps 5000 --device cuda --output myrun
+python -m dreamphrasegpt --dataset mydata.txt --no-save
+python -m dreamphrasegpt --models
+python -m dreamphrasegpt --compare --compare-steps 500
 ```
 
 For the full CLI, run:
 
 ```powershell
-python dreamphrasegpt.py --help
+python -m dreamphrasegpt --help
 ```
 
 ## Architecture and training

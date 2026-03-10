@@ -4,6 +4,7 @@ repos:
     hooks:
       - id: check-added-large-files
         args: ["--maxkb=10240"]
+        exclude: \.wasm$
       - id: check-case-conflict
       - id: check-merge-conflict
       - id: end-of-file-fixer
@@ -23,3 +24,12 @@ repos:
     hooks:
       - id: mdformat
         additional_dependencies: [mdformat-gfm]
+
+  - repo: local
+    hooks:
+      - id: site-biome
+        name: site biome check
+        entry: npm run site:check
+        language: system
+        pass_filenames: false
+        files: ^site/(src/.*|index\.html|package(-lock)?\.json|tsconfig(\.node)?\.json|components\.json|vite\.config\.ts|biome\.json)$

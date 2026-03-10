@@ -400,7 +400,7 @@ class JsBundleCompatibilityTests(unittest.TestCase):
             artifacts.export_js_model_bundle(model_path, bundle_path)
 
             result = subprocess.run(
-                ["node", "run_js_bundle.js", str(bundle_path), "--samples", "1"],
+                ["node", "scripts/run_js_bundle.js", str(bundle_path), "--samples", "1"],
                 cwd=REPO_ROOT,
                 capture_output=True,
                 text=True,

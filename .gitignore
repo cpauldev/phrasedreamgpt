@@ -11,6 +11,12 @@ venv/
 
 # Node
 node_modules/
+dist/
+site/node_modules/
+site/dist/
+preview.log
+site-dev.log
+tmp-coss-ui/
 
 # Pre-commit cache
 .pre-commit-cache/
