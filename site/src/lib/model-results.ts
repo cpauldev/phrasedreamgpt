@@ -75,6 +75,39 @@ export function useModelResults(
     };
   }, [cancelActiveRequest]);
 
+  // Fetches a page set for the given temperature key. Returns null if the
+  // request was cancelled or superseded by a newer one. Re-throws for real
+  // errors. Always cleans up activeController when the request is current.
+  const executeFetch = useCallback(
+    async (
+      activeRequest: { id: number; signal: AbortSignal },
+      temperatureKey: string,
+    ): Promise<ResultPageSet | null> => {
+      try {
+        const pageSet = await requestPageSet(
+          bundlePath,
+          RESULTS_PER_SET,
+          temperatureKey,
+          activeRequest.signal,
+        );
+        return activeRequest.id === requestId.current ? pageSet : null;
+      } catch (caughtError) {
+        if (activeRequest.id !== requestId.current || isAbortError(caughtError)) {
+          return null;
+        }
+        throw caughtError;
+      } finally {
+        if (
+          activeRequest.id === requestId.current &&
+          activeController.current?.signal === activeRequest.signal
+        ) {
+          activeController.current = null;
+        }
+      }
+    },
+    [bundlePath],
+  );
+
   const loadFreshSet = useCallback(
     async (temperatureKey: string, isInitialRequest = false) => {
       const activeRequest = startRequest();
@@ -90,30 +123,15 @@ export function useModelResults(
       setNextBatch(null);
 
       try {
-        const nextPageSet = await requestPageSet(
-          bundlePath,
-          RESULTS_PER_SET,
-          temperatureKey,
-          activeRequest.signal,
-        );
-
-        if (activeRequest.id !== requestId.current) {
-          return;
+        const pageSet = await executeFetch(activeRequest, temperatureKey);
+        if (pageSet) {
+          setCurrentSet(pageSet);
+          setCurrentPageIndex(0);
         }
-
-        setCurrentSet(nextPageSet);
-        setCurrentPageIndex(0);
       } catch (caughtError) {
-        if (activeRequest.id !== requestId.current || isAbortError(caughtError)) {
-          return;
-        }
-
         setError(getErrorMessage(caughtError));
       } finally {
         if (activeRequest.id === requestId.current) {
-          if (activeController.current?.signal === activeRequest.signal) {
-            activeController.current = null;
-          }
           setIsRefreshingSet(false);
           if (isInitialRequest) {
             setIsInitialLoading(false);
@@ -121,7 +139,7 @@ export function useModelResults(
         }
       }
     },
-    [bundlePath, startRequest],
+    [executeFetch, startRequest],
   );
 
   const prepareNextSet = useCallback(
@@ -133,36 +151,21 @@ export function useModelResults(
       setError("");
 
       try {
-        const nextPageSet = await requestPageSet(
-          bundlePath,
-          RESULTS_PER_SET,
-          temperatureKey,
-          activeRequest.signal,
-        );
-
-        if (activeRequest.id !== requestId.current) {
-          return;
+        const pageSet = await executeFetch(activeRequest, temperatureKey);
+        if (pageSet) {
+          setIsWaitingForNextBatch(false);
+          setNextBatch(pageSet);
         }
-
-        setIsWaitingForNextBatch(false);
-        setNextBatch(nextPageSet);
       } catch (caughtError) {
-        if (activeRequest.id !== requestId.current || isAbortError(caughtError)) {
-          return;
-        }
-
         setIsWaitingForNextBatch(false);
         setError(getErrorMessage(caughtError));
       } finally {
         if (activeRequest.id === requestId.current) {
-          if (activeController.current?.signal === activeRequest.signal) {
-            activeController.current = null;
-          }
           setIsPreparingNextSet(false);
         }
       }
     },
-    [bundlePath, startRequest],
+    [executeFetch, startRequest],
   );
 
   useEffect(() => {

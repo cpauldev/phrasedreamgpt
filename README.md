@@ -138,15 +138,6 @@ npm install
 npm run dev
 ```
 
-Build the static site:
-
-```powershell
-cd site
-npm run build
-```
-
-GitHub Pages deployment is configured with `.github/workflows/deploy-pages.yml`. After pushing to `main`, set the repository Pages source to `GitHub Actions`.
-
 ## Saved runs
 
 A standard saved run looks like:

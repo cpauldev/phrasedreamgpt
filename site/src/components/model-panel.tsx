@@ -1,5 +1,5 @@
 import { ArrowUpRight, DownloadIcon, HeartIcon, InfoIcon, SparklesIcon, XIcon } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
@@ -67,7 +67,7 @@ export function ModelPanel({
   } = useModelResults(bundlePath, temperatureKey);
   const { likes, toggleLike } = usePersistentLikes(`dreamphrasegpt:likes:${bundlePath}`);
 
-  const likedResults = new Set(likes.map(normalizeLikeValue));
+  const likedResults = useMemo(() => new Set(likes.map(normalizeLikeValue)), [likes]);
   const hasVisibleResults = visibleResults.some(Boolean);
   const isGenerateDisabled = isInitialLoading || isRefreshingSet || isWaitingForNextBatch;
 

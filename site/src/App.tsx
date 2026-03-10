@@ -20,11 +20,13 @@ export default function App() {
         <div className="mx-auto flex w-full max-w-5xl flex-col px-4 py-5 sm:px-6">
           <header className="my-8 flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-3xl space-y-3">
-              <img
-                src={BANNER_SRC}
-                alt="DreamPhraseGPT"
-                className="h-auto w-full max-w-md sm:max-w-lg"
-              />
+              <h1 className="leading-none">
+                <img
+                  src={BANNER_SRC}
+                  alt="DreamPhraseGPT"
+                  className="h-auto w-full max-w-md sm:max-w-lg"
+                />
+              </h1>
               <p className="text-sm leading-6 text-muted-foreground sm:text-base">
                 DreamPhraseGPT trains a character-level transformer on any newline-delimited text
                 file and can generate strings that follow the character patterns, structure, and
