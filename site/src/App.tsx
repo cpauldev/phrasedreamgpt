@@ -74,10 +74,10 @@ export default function App() {
                           href={REPO_URL}
                           target="_blank"
                           rel="noreferrer"
-                          aria-label="Open the DreamPhraseGPT repository"
+                          aria-label="View repository on GitHub"
                         >
                           <Github />
-                          Repo
+                          View on GitHub
                           <ArrowUpRight />
                         </a>
                       }
