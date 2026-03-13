@@ -6,6 +6,13 @@
 
 [Live demo](https://cpauldev.github.io/dreamphrase-gpt/)
 
+<details>
+<summary>Preview</summary>
+
+![DreamPhraseGPT preview](assets/dreamphrasegpt-preview.png)
+
+</details>
+
 Example outputs trained on English words include `glossoscope`, `heartways`, `bulletine`, `joulemaker`, `braqueousness`, `chlorosiphon`, `langeling`, `margariums`, `outtravelers`, and `zamoralize`.
 
 Example outputs trained on U.S. baby names include `Miryella`, `Beliana`, `Camiliah`, `Cheraine`, `Leeandro`, `Eivyn`, `Franceline`, `Jadiza`, `Dejanell`, and `Zalinda`.

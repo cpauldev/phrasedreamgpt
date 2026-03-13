@@ -25,7 +25,7 @@ export default function App() {
     <TooltipProvider delay={200}>
       <main className="min-h-screen bg-background text-foreground">
         <div className="mx-auto flex w-full max-w-5xl flex-col px-4 py-5 sm:px-6">
-          <header className="my-8 flex flex-wrap items-start justify-between gap-4">
+          <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-3xl space-y-3">
               <h1 className="leading-none">
                 <img
