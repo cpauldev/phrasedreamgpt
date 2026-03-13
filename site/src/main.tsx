@@ -3,10 +3,10 @@ import ReactDOM from "react-dom/client";
 import "@fontsource-variable/manrope";
 
 import App from "./App";
+import { initializeAppTheme, ThemeProvider } from "./lib/app-theme";
 import "./index.css";
 
-document.documentElement.classList.remove("dark");
-document.documentElement.style.colorScheme = "light";
+initializeAppTheme();
 
 const rootElement = document.getElementById("root");
 
@@ -16,6 +16,8 @@ if (!(rootElement instanceof HTMLElement)) {
 
 ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
-    <App />
+    <ThemeProvider>
+      <App />
+    </ThemeProvider>
   </React.StrictMode>,
 );

@@ -1,9 +1,11 @@
-import { ArrowUpRight, Github } from "lucide-react";
+import { ArrowUpRight, Github, Moon, Sun } from "lucide-react";
 import { useState } from "react";
 
 import { ModelPanel, type ModelPanelTab } from "@/components/model-panel";
 import { Button } from "@/components/ui/button";
+import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "@/components/ui/preview-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useAppTheme } from "@/lib/app-theme";
 import { MODEL_PANELS } from "@/lib/model-catalog";
 import { resolveBasePath } from "@/lib/utils";
 
@@ -13,6 +15,11 @@ const BANNER_SRC = resolveBasePath("dreamphrasegpt.png");
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ModelPanelTab>("generated");
+  const { resolvedTheme, setPreference } = useAppTheme();
+
+  function toggleTheme() {
+    setPreference(resolvedTheme === "dark" ? "light" : "dark");
+  }
 
   return (
     <TooltipProvider delay={200}>
@@ -45,14 +52,68 @@ export default function App() {
               </p>
             </div>
 
-            <HeaderLinkButton
-              ariaLabel="Open the DreamPhraseGPT repository"
-              href={REPO_URL}
-              icon={<Github />}
-              label="Repo"
-              variant="outline"
-              className="gap-2"
-            />
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label={
+                  resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+                }
+                onClick={toggleTheme}
+              >
+                {resolvedTheme === "dark" ? <Sun /> : <Moon />}
+              </Button>
+
+              <PreviewCard>
+                <PreviewCardTrigger
+                  delay={300}
+                  render={
+                    <Button
+                      render={
+                        <a
+                          href={REPO_URL}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label="Open the DreamPhraseGPT repository"
+                        >
+                          <Github />
+                          Repo
+                          <ArrowUpRight />
+                        </a>
+                      }
+                      variant="outline"
+                      className="gap-2"
+                    />
+                  }
+                />
+                <PreviewCardPopup
+                  align="end"
+                  sideOffset={8}
+                  className="w-80 max-w-[calc(100vw-2rem)] text-wrap"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Github className="size-4 shrink-0" />
+                      <span className="font-semibold text-sm">cpauldev/dreamphrase-gpt</span>
+                    </div>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      Train a character-level GPT on newline-delimited text files and generate new
+                      strings that follow the character patterns, structure, and common sequences
+                      learned from the dataset.
+                    </p>
+                    <a
+                      href={REPO_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-foreground underline-offset-4 hover:underline"
+                    >
+                      View on GitHub
+                      <ArrowUpRight className="size-3" />
+                    </a>
+                  </div>
+                </PreviewCardPopup>
+              </PreviewCard>
+            </div>
           </header>
 
           <section className="grid gap-6 lg:grid-cols-2">
