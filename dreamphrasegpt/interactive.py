@@ -6,8 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar
 
-import torch
-
 from .artifacts import (
     artifact_path_supports_resume,
     delete_artifact_file,
@@ -372,9 +370,7 @@ def interactive_artifact_manager(
                 return
 
             if action in {"r", "resume"} and is_resumable:
-                preview = load_artifact_bundle(
-                    artifact_path, ArtifactRuntimePolicy.for_resume(torch.device("cpu"))
-                )
+                preview = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_resume())
                 print_section("resume")
                 print(f"artifact    {display_path}")
                 if preview.training_metadata.get("input_path"):

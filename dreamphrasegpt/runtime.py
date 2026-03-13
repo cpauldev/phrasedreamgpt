@@ -510,12 +510,12 @@ def move_optimizer_state_to_device(optimizer: torch.optim.Optimizer, device: tor
 
 
 def verify_resume_runtime(saved_training_config: dict, runtime: RuntimeSettings) -> None:
-    expected_device = saved_training_config.get("resolved_device")
-    expected_amp_enabled = saved_training_config.get("amp_enabled")
-    expected_amp_dtype = saved_training_config.get("amp_dtype")
-    expected_compile_enabled = saved_training_config.get("compile_enabled")
+    expected_device = saved_training_config["resolved_device"]
+    expected_amp_enabled = saved_training_config["amp_enabled"]
+    expected_amp_dtype = saved_training_config["amp_dtype"]
+    expected_compile_enabled = saved_training_config["compile_enabled"]
 
-    if expected_device is not None and runtime.resolved_device != expected_device:
+    if runtime.resolved_device != expected_device:
         fail(
             (
                 "Exact resume requires the same execution backend that was used "
@@ -528,7 +528,7 @@ def verify_resume_runtime(saved_training_config: dict, runtime: RuntimeSettings)
             ),
         )
 
-    if expected_amp_enabled is not None and runtime.amp_enabled != expected_amp_enabled:
+    if runtime.amp_enabled != expected_amp_enabled:
         fail(
             (
                 "Exact resume requires the same AMP setting that was active when "
@@ -540,7 +540,7 @@ def verify_resume_runtime(saved_training_config: dict, runtime: RuntimeSettings)
             ),
         )
 
-    if expected_amp_dtype is not None and runtime.amp_dtype != expected_amp_dtype:
+    if runtime.amp_dtype != expected_amp_dtype:
         fail(
             (
                 "Exact resume requires the same AMP dtype that was active when "
@@ -552,7 +552,7 @@ def verify_resume_runtime(saved_training_config: dict, runtime: RuntimeSettings)
             ),
         )
 
-    if expected_compile_enabled is not None and runtime.compile_enabled != expected_compile_enabled:
+    if runtime.compile_enabled != expected_compile_enabled:
         fail(
             (
                 "Exact resume requires the same compile setting that was active "
@@ -701,7 +701,6 @@ def train_once(
         elapsed=elapsed,
         total_tokens=total_tokens,
         tok_s=run_tokens / elapsed,
-        steps_s=training_config.steps / elapsed,
         final_loss=final_loss,
         completed_steps=target_total_steps,
         optimizer_state=optimizer.state_dict(),

@@ -220,16 +220,7 @@ def validate_args(args: argparse.Namespace) -> None:
     build_training_defaults(args, dataset_path=args.dataset).validate()
     build_generation_defaults(args).validate()
 
-    artifact_operations = [("--models", args.models)]
-    active_artifact_operations = [name for name, active in artifact_operations if active]
-
-    if len(active_artifact_operations) > 1:
-        fail(
-            "Only one artifact operation can be used at a time.",
-            f"Choose one of: {', '.join(active_artifact_operations)}.",
-        )
-
-    if args.compare and active_artifact_operations:
+    if args.compare and args.models:
         fail(
             "--compare cannot be combined with artifact management commands.",
             "Run compare mode by itself, or run the artifact operation separately.",
@@ -243,7 +234,7 @@ def validate_args(args: argparse.Namespace) -> None:
             "Run compare mode by itself, or remove --output.",
         )
 
-    if explicit_save_path and active_artifact_operations:
+    if explicit_save_path and args.models:
         fail(
             "--output cannot be combined with artifact management commands.",
             "Train a model to save it, or run the artifact operation separately.",
@@ -471,7 +462,7 @@ def run_artifact_inference_flow(
     should_generate: bool,
 ) -> None:
     device = resolve_device(requested_device)
-    bundle = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_inference(device))
+    bundle = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_inference())
     model = build_model(bundle.model_config, bundle.state_dict, device)
 
     device_str = (
@@ -503,7 +494,7 @@ def run_resume_flow(
     should_generate: bool,
 ) -> None:
     device = resolve_device(user_training_config.requested_device)
-    bundle = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_resume(device))
+    bundle = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_resume())
     require_exact_resume_artifact(bundle.raw_artifact, artifact_path)
 
     resolved_training = resolve_resume_training_config(user_training_config, bundle)

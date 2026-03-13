@@ -13,15 +13,11 @@ import {
 } from "@/lib/theme";
 
 type ThemeContextValue = {
-  preference: ThemePreference;
-  resetPreference: () => void;
   resolvedTheme: ResolvedTheme;
   setPreference: (preference: ThemePreference) => void;
 };
 
 const FALLBACK_THEME_CONTEXT: ThemeContextValue = {
-  preference: "system",
-  resetPreference: () => {},
   resolvedTheme: "light",
   setPreference: () => {},
 };
@@ -79,12 +75,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<ThemeContextValue>(
     () => ({
-      preference,
-      resetPreference: () => setPreference("system"),
       resolvedTheme,
       setPreference,
     }),
-    [preference, resolvedTheme],
+    [resolvedTheme],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
@@ -96,18 +90,9 @@ export function useAppTheme() {
 
 export function initializeAppTheme() {
   if (typeof document === "undefined" || typeof window === "undefined") {
-    return null;
+    return;
   }
 
   const preference = readStoredThemePreference(window.localStorage);
-  const resolvedTheme = applyThemePreference(
-    document.documentElement,
-    preference,
-    getSystemPrefersDark(window),
-  );
-
-  return {
-    preference,
-    resolvedTheme,
-  };
+  applyThemePreference(document.documentElement, preference, getSystemPrefersDark(window));
 }

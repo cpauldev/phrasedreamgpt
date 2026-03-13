@@ -68,7 +68,6 @@ def make_dummy_result(training_config: TrainingConfig) -> TrainingResult:
         elapsed=0.01,
         total_tokens=8,
         tok_s=100.0,
-        steps_s=10.0,
         final_loss=0.1,
         completed_steps=training_config.steps,
         optimizer_state={},
@@ -86,7 +85,7 @@ def make_dummy_result(training_config: TrainingConfig) -> TrainingResult:
     )
 
 
-def create_artifact_fixture(root: Path) -> tuple[Path, Path, Path]:
+def create_artifact_fixture(root: Path) -> tuple[Path, Path]:
     dataset = Dataset(
         data=torch.tensor([3, 0, 1, 3, 1, 2, 3], dtype=torch.long),
         id_to_char=["a", "b", "c"],
@@ -143,24 +142,13 @@ def create_artifact_fixture(root: Path) -> tuple[Path, Path, Path]:
 
     model_path = root / "fixture.model.pt"
     resume_path = root / "fixture.resume.pt"
-    combined_path = root / "fixture_combined.pt"
-
     artifacts.save_artifact_file(
         artifacts.build_model_artifact(checkpoint, source_path=resume_path),
         model_path,
     )
-    resume_artifact = artifacts.build_resume_artifact(checkpoint, source_path=model_path)
+    resume_artifact = artifacts.build_resume_artifact(checkpoint)
     artifacts.save_artifact_file(resume_artifact, resume_path)
-    artifacts.save_artifact_file(
-        artifacts.merge_model_and_resume_artifacts(
-            artifacts.build_model_artifact(checkpoint, source_path=resume_path),
-            resume_artifact,
-            model_path=model_path,
-            resume_path=resume_path,
-        ),
-        combined_path,
-    )
-    return model_path, resume_path, combined_path
+    return model_path, resume_path
 
 
 class ValidationParityTests(unittest.TestCase):
@@ -313,14 +301,14 @@ class RuntimeTests(unittest.TestCase):
 class ArtifactTests(unittest.TestCase):
     def test_inference_policy_ignores_resume_companion_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            model_path, _, _ = create_artifact_fixture(Path(temp_dir))
+            model_path, _ = create_artifact_fixture(Path(temp_dir))
             inference_bundle = artifacts.load_artifact_bundle(
                 model_path,
-                artifacts.ArtifactRuntimePolicy.for_inference(torch.device("cpu")),
+                artifacts.ArtifactRuntimePolicy.for_inference(),
             )
             resume_bundle = artifacts.load_artifact_bundle(
                 model_path,
-                artifacts.ArtifactRuntimePolicy.for_resume(torch.device("cpu")),
+                artifacts.ArtifactRuntimePolicy.for_resume(),
             )
 
         self.assertEqual(inference_bundle.dataset.data.numel(), 0)
@@ -332,10 +320,10 @@ class ArtifactTests(unittest.TestCase):
 
     def test_resume_only_artifact_loads_companion_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            _, resume_path, _ = create_artifact_fixture(Path(temp_dir))
+            _, resume_path = create_artifact_fixture(Path(temp_dir))
             bundle = artifacts.load_artifact_bundle(
                 resume_path,
-                artifacts.ArtifactRuntimePolicy.for_resume(torch.device("cpu")),
+                artifacts.ArtifactRuntimePolicy.for_resume(),
             )
 
         self.assertIn("state_dict", bundle.raw_artifact)
@@ -343,17 +331,46 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("completed_steps", bundle.resume_state)
         self.assertIsNotNone(bundle.source_filter)
 
-    def test_combined_artifact_loads_in_one_step(self) -> None:
+    def test_legacy_checkpoint_resume_name_is_not_recognized(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            _, _, combined_path = create_artifact_fixture(Path(temp_dir))
-            bundle = artifacts.load_artifact_bundle(
+            model_path, resume_path = create_artifact_fixture(Path(temp_dir))
+            legacy_resume_path = resume_path.with_name("fixture.checkpoint.pt")
+            resume_path.rename(legacy_resume_path)
+
+            self.assertFalse(artifacts.artifact_path_supports_resume(model_path))
+
+    def test_resume_requires_current_training_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, resume_path = create_artifact_fixture(Path(temp_dir))
+            resume_artifact = torch.load(resume_path, map_location="cpu", weights_only=False)
+            del resume_artifact["training_config"]["requested_dtype"]
+            artifacts.save_artifact_file(resume_artifact, resume_path)
+
+            with self.assertRaises(SystemExit):
+                artifacts.load_artifact_bundle(
+                    resume_path,
+                    artifacts.ArtifactRuntimePolicy.for_resume(),
+                )
+
+    def test_combined_artifact_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path, resume_path = create_artifact_fixture(Path(temp_dir))
+            combined_path = Path(temp_dir) / "fixture_combined.pt"
+            artifacts.save_artifact_file(
+                artifacts.merge_model_and_resume_artifacts(
+                    artifacts.load_raw_artifact_file(model_path, torch.device("cpu")),
+                    artifacts.load_raw_artifact_file(resume_path, torch.device("cpu")),
+                    model_path=model_path,
+                    resume_path=resume_path,
+                ),
                 combined_path,
-                artifacts.ArtifactRuntimePolicy.for_resume(torch.device("cpu")),
             )
 
-        self.assertIn("optimizer_state", bundle.raw_artifact)
-        self.assertIn("state_dict", bundle.raw_artifact)
-        self.assertIsNotNone(bundle.source_filter)
+            with self.assertRaises(SystemExit):
+                artifacts.load_artifact_bundle(
+                    combined_path,
+                    artifacts.ArtifactRuntimePolicy.for_resume(),
+                )
 
     def test_corrupt_artifact_fails_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -362,7 +379,7 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 artifacts.load_artifact_bundle(
                     bad_path,
-                    artifacts.ArtifactRuntimePolicy.for_inference(torch.device("cpu")),
+                    artifacts.ArtifactRuntimePolicy.for_inference(),
                 )
 
     def test_resolve_save_paths_and_related_paths(self) -> None:
@@ -372,7 +389,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(paths.directory, models_dir / "myrun")
             self.assertEqual(paths.model.name, "myrun.model.pt")
 
-            model_path, resume_path, _ = create_artifact_fixture(models_dir / "fixture")
+            model_path, resume_path = create_artifact_fixture(models_dir / "fixture")
             js_bundle = model_path.with_suffix("").with_suffix("")
             js_bundle = js_bundle.parent / f"{js_bundle.name}.model"
             js_bundle.write_bytes(b"bundle")
@@ -395,7 +412,7 @@ class ArtifactTests(unittest.TestCase):
 class JsBundleCompatibilityTests(unittest.TestCase):
     def test_exported_bundle_runs_with_node_runner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            model_path, _, _ = create_artifact_fixture(Path(temp_dir))
+            model_path, _ = create_artifact_fixture(Path(temp_dir))
             bundle_path = Path(temp_dir) / "fixture.model"
             artifacts.export_js_model_bundle(model_path, bundle_path)
 

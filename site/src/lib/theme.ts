@@ -2,14 +2,14 @@ export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
 export const THEME_STORAGE_KEY = "dreamphrasegpt-browser:theme";
-export const THEME_MEDIA_QUERY = "(prefers-color-scheme: dark)";
+const THEME_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
-export const THEME_COLOR_BY_MODE: Record<ResolvedTheme, string> = {
+const THEME_COLOR_BY_MODE: Record<ResolvedTheme, string> = {
   dark: "#09090b",
   light: "#ffffff",
 };
 
-export function isThemePreference(value: unknown): value is ThemePreference {
+function isThemePreference(value: unknown): value is ThemePreference {
   return value === "system" || value === "light" || value === "dark";
 }
 
@@ -63,7 +63,7 @@ export function getSystemPrefersDark(windowObject?: Pick<Window, "matchMedia"> |
   }
 }
 
-export function applyResolvedTheme(
+function applyResolvedTheme(
   rootElement: HTMLElement,
   theme: ResolvedTheme,
   documentObject: Pick<Document, "querySelector"> = document,

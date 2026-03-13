@@ -7,7 +7,7 @@ type ResultPageSet = {
   temperatureKey: string;
 };
 
-export const DISPLAY_COUNT = 10;
+const DISPLAY_COUNT = 10;
 export const DISPLAY_COLUMN_COUNT = 2;
 export const DISPLAY_ROW_COUNT = DISPLAY_COUNT / DISPLAY_COLUMN_COUNT;
 const RESULT_PAGES_PER_SET = 5;
@@ -20,7 +20,7 @@ export const TEMPERATURE_TICK_STEP = 0.1;
 export const TEMPERATURE_TICKS = buildTemperatureTicks();
 const EMPTY_RESULTS = toDisplayRows([]);
 
-export type ModelResultsState = {
+type ModelResultsState = {
   error: string;
   generateNextPage: () => void;
   isInitialLoading: boolean;

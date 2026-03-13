@@ -74,14 +74,10 @@ def export_onnx_quietly(*args, **kwargs) -> None:
         raise
 
 
-ARTIFACT_EXTENSIONS = frozenset({".pt", ".pth"})
+ARTIFACT_EXTENSIONS = frozenset({".pt"})
 ARTIFACT_SUFFIXES = (
     (".resume.pt", "resume", ".pt"),
-    (".resume.pth", "resume", ".pth"),
-    (".checkpoint.pt", "resume", ".pt"),
-    (".checkpoint.pth", "resume", ".pth"),
     (".model.pt", "model", ".pt"),
-    (".model.pth", "model", ".pth"),
 )
 MODEL_ARTIFACT_KEYS = frozenset({"model_config", "tokenizer", "state_dict"})
 RESUME_ARTIFACT_KEYS = frozenset(
@@ -95,15 +91,27 @@ EXACT_RESUME_ARTIFACT_KEYS = frozenset(
     {"dataset_data", "optimizer_state", "resume_state", "rng_state"}
 )
 RESUME_TRAINING_CONFIG_KEYS = frozenset(
-    {"batch_size", "learning_rate", "beta1", "beta2", "eps", "weight_decay"}
+    {
+        "input_path",
+        "seed",
+        "steps",
+        "last_run_steps",
+        "batch_size",
+        "learning_rate",
+        "beta1",
+        "beta2",
+        "eps",
+        "weight_decay",
+        "requested_device",
+        "resolved_device",
+        "requested_dtype",
+        "amp_requested",
+        "amp_enabled",
+        "amp_dtype",
+        "compile_requested",
+        "compile_enabled",
+    }
 )
-ARTIFACT_TYPE_ALIASES = {
-    "checkpoint": "resume",
-    "training": "resume",
-    "resume": "resume",
-    "model": "model",
-    "inference": "model",
-}
 
 
 @dataclass(frozen=True)
@@ -177,17 +185,10 @@ def build_staged_artifact_paths(final_paths: ArtifactPaths, staging_dir: Path) -
     )
 
 
-def legacy_resume_path(final_paths: ArtifactPaths) -> Path:
-    return final_paths.resume.with_name(
-        final_paths.resume.name.replace(".resume", ".checkpoint", 1)
-    )
-
-
 def allowed_artifact_names(final_paths: ArtifactPaths) -> set[str]:
     return {
         final_paths.model.name,
         final_paths.resume.name,
-        legacy_resume_path(final_paths).name,
         final_paths.js_bundle.name,
     }
 
@@ -281,8 +282,6 @@ def resume_companion_candidates(path: Path) -> list[Path]:
     return [
         artifact_spec.artifact_directory
         / f"{artifact_spec.artifact_stem}.resume{artifact_spec.extension}",
-        artifact_spec.artifact_directory
-        / f"{artifact_spec.artifact_stem}.checkpoint{artifact_spec.extension}",
     ]
 
 
@@ -611,8 +610,6 @@ def merge_model_and_resume_artifacts(
             merged_artifact[key] = resume_artifact[key]
     if merged_artifact.get("created_at") is None and resume_artifact.get("created_at") is not None:
         merged_artifact["created_at"] = resume_artifact["created_at"]
-    if resume_artifact.get("source_model"):
-        merged_artifact["source_model"] = resume_artifact["source_model"]
     if resume_path is not None:
         merged_artifact["resume_data_path"] = str(resume_path)
     return merged_artifact
@@ -623,13 +620,9 @@ def artifact_supports_exact_resume(artifact: dict) -> bool:
 
 
 def describe_artifact_type(artifact: dict) -> str:
-    checkpoint_type = ARTIFACT_TYPE_ALIASES.get(artifact.get("checkpoint_type"))
-    if checkpoint_type is not None:
+    checkpoint_type = artifact.get("checkpoint_type")
+    if checkpoint_type in {"model", "resume"}:
         return checkpoint_type
-    if artifact_supports_exact_resume(artifact):
-        return "resume"
-    if MODEL_ARTIFACT_KEYS.issubset(artifact):
-        return "model"
     return "unknown"
 
 
@@ -707,6 +700,12 @@ def _load_inference_artifact(artifact_path: Path, device: torch.device) -> dict:
     has_model_payload = MODEL_ARTIFACT_KEYS.issubset(artifact)
     has_resume_payload = RESUME_ARTIFACT_KEYS.issubset(artifact)
 
+    if has_model_payload and has_resume_payload:
+        fail(
+            f"Combined model+resume artifacts are no longer supported: {artifact_path}",
+            "Use a current saved run with separate .model.pt and .resume.pt files.",
+        )
+
     if has_model_payload:
         validate_model_artifact(artifact, artifact_path=artifact_path)
         return artifact
@@ -725,10 +724,16 @@ def _load_inference_artifact(artifact_path: Path, device: torch.device) -> dict:
 
 def _load_resumable_artifact(artifact_path: Path, device: torch.device) -> dict:
     artifact = load_raw_artifact_file(artifact_path, device)
-    artifact_type = ARTIFACT_TYPE_ALIASES.get(artifact.get("checkpoint_type"))
+    artifact_type = describe_artifact_type(artifact)
 
     has_model_payload = MODEL_ARTIFACT_KEYS.issubset(artifact)
     has_resume_payload = RESUME_ARTIFACT_KEYS.issubset(artifact)
+
+    if has_model_payload and has_resume_payload:
+        fail(
+            f"Combined model+resume artifacts are no longer supported: {artifact_path}",
+            "Use a current saved run with separate .model.pt and .resume.pt files.",
+        )
 
     if artifact_type == "resume" and not has_model_payload:
         model_path = model_companion_path(artifact_path)
@@ -739,11 +744,6 @@ def _load_resumable_artifact(artifact_path: Path, device: torch.device) -> dict:
             model_path=model_path,
             resume_path=artifact_path,
         )
-
-    if has_model_payload and has_resume_payload:
-        validate_model_artifact(artifact, artifact_path=artifact_path)
-        validate_resume_artifact(artifact, artifact_path=artifact_path)
-        return artifact
 
     if has_model_payload:
         validate_model_artifact(artifact, artifact_path=artifact_path)
@@ -791,7 +791,7 @@ def artifact_path_supports_resume(path: Path) -> bool:
         return find_existing_resume_companion(path) is not None
 
     try:
-        bundle = load_artifact_bundle(path, ArtifactRuntimePolicy.for_resume(torch.device("cpu")))
+        bundle = load_artifact_bundle(path, ArtifactRuntimePolicy.for_resume())
     except SystemExit:
         return False
     return artifact_supports_exact_resume(bundle.raw_artifact)
@@ -805,7 +805,7 @@ def infer_artifact_type_from_path(path: Path) -> str:
         return "resume"
 
     try:
-        bundle = load_artifact_bundle(path, ArtifactRuntimePolicy.for_resume(torch.device("cpu")))
+        bundle = load_artifact_bundle(path, ArtifactRuntimePolicy.for_resume())
     except SystemExit:
         return "unknown"
     if artifact_path_supports_resume(path) and bundle.artifact_type == "model":
@@ -913,14 +913,12 @@ def save_artifact_file(artifact: dict, artifact_path: Path) -> Path:
 
 def build_model_artifact(source_checkpoint: dict, source_path: Path | None = None) -> dict:
     model_artifact = {
-        "format_version": source_checkpoint.get("format_version", 1),
+        "format_version": source_checkpoint["format_version"],
         "checkpoint_type": "model",
-        "created_at": source_checkpoint.get(
-            "created_at", datetime.now().isoformat(timespec="seconds")
-        ),
+        "created_at": source_checkpoint["created_at"],
         "model_config": source_checkpoint["model_config"],
         "tokenizer": source_checkpoint["tokenizer"],
-        "source_filter": source_checkpoint.get("source_filter"),
+        "source_filter": source_checkpoint["source_filter"],
         "state_dict": source_checkpoint["state_dict"],
     }
     if source_path is not None:
@@ -928,24 +926,19 @@ def build_model_artifact(source_checkpoint: dict, source_path: Path | None = Non
     return model_artifact
 
 
-def build_resume_artifact(source_checkpoint: dict, source_path: Path | None = None) -> dict:
-    resume_artifact = {
-        "format_version": source_checkpoint.get("format_version", 1),
+def build_resume_artifact(source_checkpoint: dict) -> dict:
+    return {
+        "format_version": source_checkpoint["format_version"],
         "checkpoint_type": "resume",
-        "created_at": source_checkpoint.get(
-            "created_at", datetime.now().isoformat(timespec="seconds")
-        ),
+        "created_at": source_checkpoint["created_at"],
         "training_config": source_checkpoint["training_config"],
         "dataset_data": source_checkpoint["dataset_data"],
         "optimizer_state": source_checkpoint["optimizer_state"],
-        "scaler_state": source_checkpoint.get("scaler_state"),
+        "scaler_state": source_checkpoint["scaler_state"],
         "resume_state": source_checkpoint["resume_state"],
-        "source_filter": source_checkpoint.get("source_filter"),
+        "source_filter": source_checkpoint["source_filter"],
         "rng_state": source_checkpoint["rng_state"],
     }
-    if source_path is not None:
-        resume_artifact["source_model"] = str(source_path)
-    return resume_artifact
 
 
 def build_js_bundle_bytes(
@@ -1029,19 +1022,17 @@ def export_js_model_bundle_from_model(
     return output_path
 
 
-def export_js_model_bundle(
-    source_path: Path, output_path: Path, *, source_artifact_path: Path | None = None
-) -> Path:
+def export_js_model_bundle(source_path: Path, output_path: Path) -> Path:
     bundle = load_artifact_bundle(
         source_path,
-        ArtifactRuntimePolicy.for_inference(torch.device("cpu")),
+        ArtifactRuntimePolicy.for_inference(),
     )
     model = build_model(bundle.model_config, bundle.state_dict, torch.device("cpu"))
     return export_js_model_bundle_from_model(
         model,
         bundle.dataset,
         output_path,
-        source_path=source_artifact_path or source_path,
+        source_path=source_path,
         model_config=bundle.model_config,
         source_filter=bundle.source_filter,
     )
@@ -1083,7 +1074,7 @@ def save_artifact_set(
             staged_paths.model,
         )
         save_artifact_file(
-            build_resume_artifact(checkpoint, source_path=artifact_paths.model),
+            build_resume_artifact(checkpoint),
             staged_paths.resume,
         )
         export_js_model_bundle_from_model(
@@ -1107,7 +1098,7 @@ def resolve_resume_training_config(
 ) -> TrainingConfig:
     training_metadata = resolve_resume_training_metadata(bundle.raw_artifact, bundle.artifact_path)
     return TrainingConfig(
-        dataset_path=training_metadata.get("input_path", user_training_config.dataset_path),
+        dataset_path=training_metadata["input_path"],
         seed=user_training_config.seed,
         steps=user_training_config.steps,
         batch_size=int(training_metadata["batch_size"]),
@@ -1118,16 +1109,9 @@ def resolve_resume_training_config(
         eps=float(training_metadata["eps"]),
         weight_decay=float(training_metadata["weight_decay"]),
         requested_device=user_training_config.requested_device,
-        requested_dtype=training_metadata.get(
-            "requested_dtype", user_training_config.requested_dtype
-        ),
-        amp_requested=training_metadata.get(
-            "amp_requested",
-            user_training_config.amp_requested,
-        ),
-        compile_requested=training_metadata.get(
-            "compile_requested", user_training_config.compile_requested
-        ),
+        requested_dtype=training_metadata["requested_dtype"],
+        amp_requested=training_metadata["amp_requested"],
+        compile_requested=training_metadata["compile_requested"],
         print_every=user_training_config.print_every,
     )
 
@@ -1279,9 +1263,7 @@ def _print_artifact_summary_section(bundle: ArtifactBundle) -> None:
 
 
 def print_artifact_details(artifact_path: Path) -> None:
-    bundle = load_artifact_bundle(
-        artifact_path, ArtifactRuntimePolicy.for_resume(torch.device("cpu"))
-    )
+    bundle = load_artifact_bundle(artifact_path, ArtifactRuntimePolicy.for_resume())
     stat = artifact_path.stat()
     _print_artifact_file_section(artifact_path, bundle, stat)
     _print_artifact_model_section(bundle)

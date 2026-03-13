@@ -153,24 +153,12 @@ def bloom_filter_from_mapping(mapping: object) -> BloomSourceFilter | None:
     false_positive_rate = _require_rate(mapping.get("false_positive_rate"))
 
     bits_value = mapping.get("bits")
-    if isinstance(bits_value, (bytes, bytearray)):
-        bits = bytes(bits_value)
-    elif isinstance(bits_value, str):
-        try:
-            bits = base64.b64decode(bits_value.encode("ascii"), validate=True)
-        except Exception as exc:
-            fail(
-                "Source filter bit payload is not valid base64.",
-                (
-                    "Regenerate the artifact to rebuild the source filter payload. "
-                    f"Original error: {exc}"
-                ),
-            )
-    else:
+    if not isinstance(bits_value, (bytes, bytearray)):
         fail(
             "Source filter bit payload is missing or invalid.",
             "Regenerate the artifact to rebuild the source filter payload.",
         )
+    bits = bytes(bits_value)
 
     return BloomSourceFilter(
         bit_count=bit_count,

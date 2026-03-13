@@ -72,7 +72,6 @@ class TrainingResult:
     elapsed: float
     total_tokens: int
     tok_s: float
-    steps_s: float
     final_loss: float
     completed_steps: int
     optimizer_state: dict
@@ -348,21 +347,18 @@ class GenerationConfig:
 @dataclass(frozen=True)
 class ArtifactRuntimePolicy:
     load_device: torch.device
-    target_device: torch.device
     include_training_state: bool
 
     @classmethod
-    def for_inference(cls, target_device: torch.device) -> ArtifactRuntimePolicy:
+    def for_inference(cls) -> ArtifactRuntimePolicy:
         return cls(
             load_device=torch.device("cpu"),
-            target_device=target_device,
             include_training_state=False,
         )
 
     @classmethod
-    def for_resume(cls, target_device: torch.device) -> ArtifactRuntimePolicy:
+    def for_resume(cls) -> ArtifactRuntimePolicy:
         return cls(
             load_device=torch.device("cpu"),
-            target_device=target_device,
             include_training_state=True,
         )

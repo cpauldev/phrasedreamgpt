@@ -136,7 +136,6 @@ type HeaderLinkButtonProps = {
   ariaLabel: string;
   className?: string;
   href: string;
-  icon?: React.ReactNode;
   label: string;
   size?: React.ComponentProps<typeof Button>["size"];
   variant: React.ComponentProps<typeof Button>["variant"];
@@ -146,7 +145,6 @@ function HeaderLinkButton({
   ariaLabel,
   className,
   href,
-  icon,
   label,
   size,
   variant,
@@ -155,7 +153,6 @@ function HeaderLinkButton({
     <Button
       render={
         <a href={href} target="_blank" rel="noreferrer" aria-label={ariaLabel}>
-          {icon}
           {label}
           <ArrowUpRight />
         </a>
