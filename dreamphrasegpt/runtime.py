@@ -4,6 +4,7 @@ import importlib.util
 import random
 import sys
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import (
+    MODEL_RESIDUAL_MODE_ATTNRES,
+    MODEL_RESIDUAL_MODE_ATTNRES_BLOCK,
     Dataset,
     GenerationConfig,
     ModelConfig,
@@ -235,6 +238,21 @@ class RMSNorm(nn.Module):
         return x * scale * self.weight
 
 
+class AttentionResidual(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.norm = RMSNorm(dim)
+        self.proj = nn.Linear(dim, 1, bias=False)
+
+    def forward(self, history: list[torch.Tensor]) -> torch.Tensor:
+        # Full AttnRes from Eq. 2-4: one learned pseudo-query attends over
+        # the embedding and all previously produced layer outputs.
+        stacked = torch.stack(history, dim=0)
+        logits = self.proj(self.norm(stacked)).squeeze(-1)
+        weights = torch.softmax(logits, dim=0)
+        return (weights.unsqueeze(-1) * stacked).sum(dim=0)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd: int, n_head: int):
         super().__init__()
@@ -271,15 +289,120 @@ class SwiGLUFeedForward(nn.Module):
 class Block(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
+        self.residual_mode = config.residual_mode
         self.norm1 = RMSNorm(config.n_embd)
         self.attn = CausalSelfAttention(config.n_embd, config.n_head)
         self.norm2 = RMSNorm(config.n_embd)
         self.feed_forward = SwiGLUFeedForward(config.n_embd, config.mlp_hidden_dim)
+        if self.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES:
+            self.attn_residual = AttentionResidual(config.n_embd)
+            self.feed_forward_residual = AttentionResidual(config.n_embd)
+        if self.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+            self.attn_block_residual = AttentionResidual(config.n_embd)
+            self.feed_forward_block_residual = AttentionResidual(config.n_embd)
+
+    def apply_attention(self, x: torch.Tensor) -> torch.Tensor:
+        return self.attn(self.norm1(x))
+
+    def apply_feed_forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.feed_forward(self.norm2(x))
+
+    @staticmethod
+    def _block_attnres_sources(
+        completed_blocks: list[torch.Tensor],
+        partial_block: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if partial_block is None:
+            return list(completed_blocks)
+        return [*completed_blocks, partial_block]
+
+    @staticmethod
+    def _merge_partial_block(
+        partial_block: torch.Tensor | None,
+        sublayer_out: torch.Tensor,
+    ) -> torch.Tensor:
+        return sublayer_out if partial_block is None else partial_block + sublayer_out
+
+    def _forward_block_attnres_sublayer(
+        self,
+        *,
+        residual: AttentionResidual,
+        transform: Callable[[torch.Tensor], torch.Tensor],
+        completed_blocks: list[torch.Tensor],
+        partial_block: torch.Tensor | None,
+    ) -> torch.Tensor:
+        sublayer_input = residual(self._block_attnres_sources(completed_blocks, partial_block))
+        sublayer_out = transform(sublayer_input)
+        return self._merge_partial_block(partial_block, sublayer_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x))
-        x = x + self.feed_forward(self.norm2(x))
+        if self.residual_mode in {MODEL_RESIDUAL_MODE_ATTNRES, MODEL_RESIDUAL_MODE_ATTNRES_BLOCK}:
+            raise TypeError(
+                "Attention Residual blocks require a residual-mode-specific forward path."
+            )
+        x = x + self.apply_attention(x)
+        x = x + self.apply_feed_forward(x)
         return x
+
+    def forward_attnres(self, history: list[torch.Tensor]) -> list[torch.Tensor]:
+        attn_input = self.attn_residual(history)
+        attn_out = self.apply_attention(attn_input)
+        history_with_attn = history + [attn_out]
+
+        ff_input = self.feed_forward_residual(history_with_attn)
+        ff_out = self.apply_feed_forward(ff_input)
+        return history_with_attn + [ff_out]
+
+    def forward_block_attnres_attention(
+        self,
+        completed_blocks: list[torch.Tensor],
+        partial_block: torch.Tensor | None,
+    ) -> torch.Tensor:
+        # Block AttnRes from Eq. 5-6 / Fig. 2: first layer in a block
+        # attends over completed block summaries only; later layers also see
+        # the current intra-block partial sum.
+        return self._forward_block_attnres_sublayer(
+            residual=self.attn_block_residual,
+            transform=self.apply_attention,
+            completed_blocks=completed_blocks,
+            partial_block=partial_block,
+        )
+
+    def forward_block_attnres_feed_forward(
+        self,
+        completed_blocks: list[torch.Tensor],
+        partial_block: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self._forward_block_attnres_sublayer(
+            residual=self.feed_forward_block_residual,
+            transform=self.apply_feed_forward,
+            completed_blocks=completed_blocks,
+            partial_block=partial_block,
+        )
+
+
+def residual_site_count(transformer_blocks: int) -> int:
+    return transformer_blocks * 2
+
+
+def resolve_block_attnres_layout(
+    total_residual_sites: int,
+    requested_block_count: int,
+) -> tuple[int, tuple[int, ...]]:
+    block_count = min(requested_block_count, total_residual_sites)
+    base_block_layers = total_residual_sites // block_count
+    remainder = total_residual_sites % block_count
+    block_end_indices: list[int] = []
+    next_end = -1
+
+    for block_index in range(block_count):
+        block_layers = base_block_layers
+        if block_index == block_count - 1:
+            block_layers += remainder
+        next_end += block_layers
+        block_end_indices.append(next_end)
+
+    return block_count, tuple(block_end_indices)
 
 
 class GPT(nn.Module):
@@ -287,17 +410,52 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.block_size = config.block_size
+        self.residual_mode = config.residual_mode
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        if self.residual_mode in {MODEL_RESIDUAL_MODE_ATTNRES, MODEL_RESIDUAL_MODE_ATTNRES_BLOCK}:
+            self.output_residual = AttentionResidual(config.n_embd)
+        if self.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+            self.total_residual_sites = residual_site_count(config.n_layer)
+            (
+                self.effective_residual_block_count,
+                self.block_end_indices,
+            ) = resolve_block_attnres_layout(
+                self.total_residual_sites,
+                config.residual_block_count,
+            )
         self.norm_f = RMSNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.apply(self._init_weights)
+        self._init_attention_residual_queries()
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
         if isinstance(module, (nn.Linear, nn.Embedding)):
             nn.init.normal_(module.weight, mean=0.0, std=0.08)
+
+    def _init_attention_residual_queries(self) -> None:
+        for module in self.modules():
+            if isinstance(module, AttentionResidual):
+                # The paper initializes every pseudo-query to zero so AttnRes
+                # starts as uniform averaging over its available sources.
+                nn.init.zeros_(module.proj.weight)
+
+    @staticmethod
+    def _maybe_close_block(
+        *,
+        depth_index: int,
+        block_end_indices: set[int],
+        completed_blocks: list[torch.Tensor],
+        partial_block: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if depth_index not in block_end_indices:
+            return partial_block
+        if partial_block is None:
+            raise RuntimeError("Block AttnRes cannot close a block without a partial sum.")
+        completed_blocks.append(partial_block)
+        return None
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         _, seq_len = idx.shape
@@ -306,8 +464,47 @@ class GPT(nn.Module):
 
         positions = torch.arange(0, seq_len, device=idx.device)
         x = self.wte(idx) + self.wpe(positions)[None, :, :]
-        for block in self.blocks:
-            x = block(x)
+        if self.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES:
+            history = [x]
+            for block in self.blocks:
+                history = block.forward_attnres(history)
+            x = self.output_residual(history)
+        elif self.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+            completed_blocks = [x]
+            partial_block: torch.Tensor | None = None
+            block_end_indices = set(self.block_end_indices)
+            depth_index = 0
+            for block in self.blocks:
+                partial_block = block.forward_block_attnres_attention(
+                    completed_blocks,
+                    partial_block,
+                )
+                partial_block = self._maybe_close_block(
+                    depth_index=depth_index,
+                    block_end_indices=block_end_indices,
+                    completed_blocks=completed_blocks,
+                    partial_block=partial_block,
+                )
+                depth_index += 1
+
+                partial_block = block.forward_block_attnres_feed_forward(
+                    completed_blocks,
+                    partial_block,
+                )
+                partial_block = self._maybe_close_block(
+                    depth_index=depth_index,
+                    block_end_indices=block_end_indices,
+                    completed_blocks=completed_blocks,
+                    partial_block=partial_block,
+                )
+                depth_index += 1
+            sources = (
+                completed_blocks if partial_block is None else completed_blocks + [partial_block]
+            )
+            x = self.output_residual(sources)
+        else:
+            for block in self.blocks:
+                x = block(x)
         x = self.norm_f(x)
         return self.lm_head(x)
 
@@ -636,6 +833,9 @@ def train_once(
     print(f"heads    {cfg.n_head}")
     print(f"embd     {cfg.n_embd}")
     print(f"block    {cfg.block_size}")
+    print(f"resid    {cfg.residual_mode}")
+    if cfg.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+        print(f"rblocks  {unwrap_model(model).effective_residual_block_count}")
 
     print_section("training")
     print(f"device   {device_label}")

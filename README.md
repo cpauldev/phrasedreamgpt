@@ -31,6 +31,7 @@ Example outputs trained on U.S. baby names include `Miryella`, `Beliana`, `Camil
 - [Artifact manager](#artifact-manager)
 - [Common commands](#common-commands)
 - [Architecture and training](#architecture-and-training)
+- [Research notes](#research-notes)
 
 ## Use cases
 
@@ -121,12 +122,14 @@ Main menu options:
 
 Other common entry points:
 
-| Goal                               | Command                                                |
-| ---------------------------------- | ------------------------------------------------------ |
-| Train with the included dataset    | `python -m dreamphrasegpt --dataset us_baby_names.txt` |
-| Open the artifact manager directly | `python -m dreamphrasegpt --models`                    |
-| Run a benchmark                    | `python -m dreamphrasegpt --compare`                   |
-| Run the newest saved JS bundle     | `node scripts/run_js_bundle.js`                        |
+| Goal                               | Command                                                                                                  |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Train with the included dataset    | `python -m dreamphrasegpt --dataset us_baby_names.txt`                                                   |
+| Train with Attention Residuals     | `python -m dreamphrasegpt --dataset us_baby_names.txt --residual-mode attnres`                           |
+| Train with Block AttnRes           | `python -m dreamphrasegpt --dataset us_baby_names.txt --residual-mode attnres_block --residual-blocks 8` |
+| Open the artifact manager directly | `python -m dreamphrasegpt --models`                                                                      |
+| Run a benchmark                    | `python -m dreamphrasegpt --compare`                                                                     |
+| Run the newest saved JS bundle     | `node scripts/run_js_bundle.js`                                                                          |
 
 Included example outputs:
 
@@ -229,9 +232,12 @@ If the `.resume.pt` file is removed, the run can still be loaded but can no long
 ```powershell
 python -m dreamphrasegpt --steps 1000
 python -m dreamphrasegpt --dataset mydata.txt --steps 5000 --device cuda --output myrun
+python -m dreamphrasegpt --dataset mydata.txt --residual-mode attnres
+python -m dreamphrasegpt --dataset mydata.txt --residual-mode attnres_block --residual-blocks 8
 python -m dreamphrasegpt --dataset mydata.txt --no-save
 python -m dreamphrasegpt --models
 python -m dreamphrasegpt --compare --compare-steps 500
+python scripts/benchmark_residual_modes.py --device cuda --steps 150 --repeats 3
 ```
 
 For the full CLI, run:
@@ -245,6 +251,8 @@ python -m dreamphrasegpt --help
 The model is a decoder-only, character-level GPT. It uses:
 
 - Causal self-attention in the style of [Attention Is All You Need](https://arxiv.org/abs/1706.03762), implemented with [`torch.nn.functional.scaled_dot_product_attention`](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+- Standard residual connections by default, with an experimental `--residual-mode attnres` option that implements the paper's Full AttnRes variant by replacing fixed residual accumulation with learned Attention Residuals over depth
+- An experimental `--residual-mode attnres_block` option that follows the paper's Block AttnRes variant, using approximately `--residual-blocks` block summaries across the model's residual sites
 - [RMSNorm](https://arxiv.org/abs/1910.07467)
 - [SwiGLU](https://arxiv.org/abs/2002.05202) feed-forward layers
 - [AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
@@ -255,3 +263,14 @@ The model is a decoder-only, character-level GPT. It uses:
 - Bundled ONNX export for Node.js inference through [`onnxruntime-node`](https://www.npmjs.com/package/onnxruntime-node)
 
 For small newline-delimited datasets, shorter training runs usually preserve novelty better. The embedded Bloom filter blocks exact source matches, though false positives can occasionally reject a novel output.
+
+## Research notes
+
+Attention Residuals research for this repository is documented in [docs/research/attention-residuals.md](docs/research/attention-residuals.md).
+
+In brief:
+
+- `attnres` and `attnres_block` both train, serialize, export to ONNX, and run through the Node.js bundle path.
+- The implementation matches the paper's key mechanics, including zero-initialized pseudo-queries and Block AttnRes boundaries over attention/MLP residual sites.
+- On the default 4-layer model with `--residual-blocks 8`, `attnres_block` reaches the paper's `N = L` limit, so it does not expose a distinct shallow-model advantage over `attnres`.
+- `standard` remains the default configuration for this repository.

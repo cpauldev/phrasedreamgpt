@@ -93,6 +93,17 @@ RESUME_ARTIFACT_HINT = (
     "or load the model from the interactive models menu for generation only."
 )
 MODEL_MLP_TYPE = "swiglu"
+MODEL_RESIDUAL_MODE_STANDARD = "standard"
+MODEL_RESIDUAL_MODE_ATTNRES = "attnres"
+MODEL_RESIDUAL_MODE_ATTNRES_BLOCK = "attnres_block"
+DEFAULT_RESIDUAL_BLOCK_COUNT = 8
+MODEL_RESIDUAL_MODES = frozenset(
+    {
+        MODEL_RESIDUAL_MODE_STANDARD,
+        MODEL_RESIDUAL_MODE_ATTNRES,
+        MODEL_RESIDUAL_MODE_ATTNRES_BLOCK,
+    }
+)
 JS_BUNDLE_MAGIC = b"PDBGONNX"
 JS_BUNDLE_FORMAT = "dreamphrasegpt-onnx-bundle"
 JS_BUNDLE_VERSION = 1
@@ -162,6 +173,8 @@ class ModelConfig:
     n_head: int
     mlp_type: str
     mlp_hidden_dim: int
+    residual_mode: str
+    residual_block_count: int
 
     @classmethod
     def from_dimensions(
@@ -172,6 +185,8 @@ class ModelConfig:
         n_layer: int,
         n_embd: int,
         n_head: int,
+        residual_mode: str = MODEL_RESIDUAL_MODE_STANDARD,
+        residual_block_count: int = DEFAULT_RESIDUAL_BLOCK_COUNT,
     ) -> ModelConfig:
         config = cls(
             vocab_size=vocab_size,
@@ -181,6 +196,8 @@ class ModelConfig:
             n_head=n_head,
             mlp_type=MODEL_MLP_TYPE,
             mlp_hidden_dim=swiglu_hidden_dim(n_embd),
+            residual_mode=residual_mode,
+            residual_block_count=residual_block_count,
         )
         config.validate(
             label="Model config",
@@ -250,6 +267,14 @@ class ModelConfig:
                 hint=hint,
                 artifact_path=artifact_path,
             ),
+            residual_mode=mapping.get("residual_mode", MODEL_RESIDUAL_MODE_STANDARD),
+            residual_block_count=require_positive_integer_field(
+                mapping.get("residual_block_count", DEFAULT_RESIDUAL_BLOCK_COUNT),
+                field_name="residual_block_count",
+                label=label,
+                hint=hint,
+                artifact_path=artifact_path,
+            ),
         )
         config.validate(label=label, hint=hint, artifact_path=artifact_path)
         return config
@@ -278,6 +303,26 @@ class ModelConfig:
                 ),
                 hint,
             )
+        if (
+            not isinstance(self.residual_mode, str)
+            or self.residual_mode not in MODEL_RESIDUAL_MODES
+        ):
+            valid_modes = "/".join(sorted(MODEL_RESIDUAL_MODES))
+            fail(
+                (
+                    f"{artifact_subject(label, artifact_path)} field 'residual_mode' "
+                    f"must be one of {valid_modes}."
+                ),
+                hint,
+            )
+        if self.residual_block_count <= 0:
+            fail(
+                (
+                    f"{artifact_subject(label, artifact_path)} field 'residual_block_count' "
+                    "must be greater than 0."
+                ),
+                hint,
+            )
 
     def to_artifact_dict(self) -> dict[str, int | str]:
         return {
@@ -288,6 +333,8 @@ class ModelConfig:
             "n_head": self.n_head,
             "mlp_type": self.mlp_type,
             "mlp_hidden_dim": self.mlp_hidden_dim,
+            "residual_mode": self.residual_mode,
+            "residual_block_count": self.residual_block_count,
         }
 
 

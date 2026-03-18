@@ -1157,6 +1157,9 @@ def _print_artifact_model_section(bundle: ArtifactBundle) -> None:
     _print_row("layers", bundle.model_config.n_layer, width)
     _print_row("embd", bundle.model_config.n_embd, width)
     _print_row("heads", bundle.model_config.n_head, width)
+    _print_row("residual", bundle.model_config.residual_mode, width)
+    if bundle.model_config.residual_mode == "attnres_block":
+        _print_row("res blocks", bundle.model_config.residual_block_count, width)
     _print_row("mlp type", bundle.model_config.mlp_type, width)
     _print_row("mlp hidden", bundle.model_config.mlp_hidden_dim, width)
 

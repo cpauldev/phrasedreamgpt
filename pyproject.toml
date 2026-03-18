@@ -7,7 +7,7 @@ name = "dreamphrasegpt"
 version = "0.1.0"
 description = "A character-level transformer trainer and inference toolkit for newline-delimited text."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
   "torch",

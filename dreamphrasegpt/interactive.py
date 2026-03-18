@@ -16,6 +16,9 @@ from .artifacts import (
     print_available_artifacts,
 )
 from .config import (
+    MODEL_RESIDUAL_MODE_ATTNRES,
+    MODEL_RESIDUAL_MODE_ATTNRES_BLOCK,
+    MODEL_RESIDUAL_MODE_STANDARD,
     ArtifactRuntimePolicy,
     GenerationConfig,
     ModelConfig,
@@ -24,6 +27,12 @@ from .config import (
 )
 
 T = TypeVar("T")
+RESIDUAL_MODE_CHOICES = (
+    MODEL_RESIDUAL_MODE_STANDARD,
+    MODEL_RESIDUAL_MODE_ATTNRES,
+    MODEL_RESIDUAL_MODE_ATTNRES_BLOCK,
+)
+RESIDUAL_MODE_CHOICES_TEXT = "/".join(RESIDUAL_MODE_CHOICES)
 
 
 def prompt_user(prompt: str) -> str:
@@ -124,13 +133,36 @@ def prompt_train_settings(
         try:
             model_config = training_config.model
             if prompt_bool(f"{'advanced':{label_w}}", False):
-                adv_labels = ["batch", "block", "layers", "embd", "heads", "lr"]
+                adv_labels = [
+                    "batch",
+                    "block",
+                    "layers",
+                    "embd",
+                    "heads",
+                    "residual",
+                    "res blocks",
+                    "lr",
+                ]
                 adv_w = max(len(label) for label in adv_labels)
                 batch_size = prompt_positive_int(f"{'batch':{adv_w}}", training_config.batch_size)
                 block_size = prompt_positive_int(f"{'block':{adv_w}}", model_config.block_size)
                 n_layer = prompt_positive_int(f"{'layers':{adv_w}}", model_config.n_layer)
                 n_embd = prompt_positive_int(f"{'embd':{adv_w}}", model_config.n_embd)
                 n_head = prompt_positive_int(f"{'heads':{adv_w}}", model_config.n_head)
+                residual_mode = _prompt_validated(
+                    f"{'residual':{adv_w}}",
+                    model_config.residual_mode,
+                    str,
+                    lambda value: value in RESIDUAL_MODE_CHOICES,
+                    f"{'residual':{adv_w}} must be {RESIDUAL_MODE_CHOICES_TEXT}",
+                    choices=RESIDUAL_MODE_CHOICES_TEXT,
+                )
+                residual_block_count = model_config.residual_block_count
+                if residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+                    residual_block_count = prompt_positive_int(
+                        f"{'res blocks':{adv_w}}",
+                        model_config.residual_block_count,
+                    )
                 learning_rate = prompt_positive_float(
                     f"{'lr':{adv_w}}", training_config.learning_rate
                 )
@@ -140,6 +172,8 @@ def prompt_train_settings(
                     n_layer=n_layer,
                     n_embd=n_embd,
                     n_head=n_head,
+                    residual_mode=residual_mode,
+                    residual_block_count=residual_block_count,
                 )
             else:
                 batch_size = training_config.batch_size

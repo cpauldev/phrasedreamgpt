@@ -38,7 +38,16 @@ from .artifacts import (
     resolve_save_paths,
     save_artifact_set,
 )
-from .config import GenerationConfig, ModelConfig, TrainingConfig, fail, print_section
+from .config import (
+    DEFAULT_RESIDUAL_BLOCK_COUNT,
+    MODEL_RESIDUAL_MODE_STANDARD,
+    MODEL_RESIDUAL_MODES,
+    GenerationConfig,
+    ModelConfig,
+    TrainingConfig,
+    fail,
+    print_section,
+)
 from .interactive import interactive_artifact_manager, main_menu, prompt_user
 from .runtime import (
     build_model,
@@ -76,6 +85,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-layer", type=int, default=4, help="Transformer depth.")
     parser.add_argument("--n-embd", type=int, default=128, help="Embedding width.")
     parser.add_argument("--n-head", type=int, default=4, help="Attention heads.")
+    parser.add_argument(
+        "--residual-mode",
+        default=MODEL_RESIDUAL_MODE_STANDARD,
+        choices=sorted(MODEL_RESIDUAL_MODES),
+        help="Residual architecture.",
+    )
+    parser.add_argument(
+        "--residual-blocks",
+        type=int,
+        default=DEFAULT_RESIDUAL_BLOCK_COUNT,
+        help="Target number of block summaries across attention/MLP residual sites.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Base learning rate.")
     parser.add_argument("--beta1", type=float, default=0.9, help="AdamW beta1.")
     parser.add_argument("--beta2", type=float, default=0.95, help="AdamW beta2.")
@@ -182,6 +203,8 @@ def build_training_defaults(
             n_layer=args.n_layer,
             n_embd=args.n_embd,
             n_head=args.n_head,
+            residual_mode=args.residual_mode,
+            residual_block_count=args.residual_blocks,
         ),
         learning_rate=args.learning_rate,
         beta1=args.beta1,
@@ -213,6 +236,7 @@ def validate_args(args: argparse.Namespace) -> None:
     require_positive(args.n_layer, "--n-layer")
     require_positive(args.n_embd, "--n-embd")
     require_positive(args.n_head, "--n-head")
+    require_positive(args.residual_blocks, "--residual-blocks")
     require_positive(args.print_every, "--print-every")
     require_positive(args.compare_steps, "--compare-steps")
     require_non_negative(args.samples, "--samples")
@@ -322,6 +346,8 @@ def bind_training_to_dataset(training_config: TrainingConfig, dataset) -> Traini
         n_layer=training_config.model.n_layer,
         n_embd=training_config.model.n_embd,
         n_head=training_config.model.n_head,
+        residual_mode=training_config.model.residual_mode,
+        residual_block_count=training_config.model.residual_block_count,
     )
     bound_training = replace(training_config, model=bound_model)
     bound_training.validate()
