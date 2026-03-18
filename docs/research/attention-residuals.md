@@ -38,6 +38,7 @@ The current implementation is backed by the following checks in [tests/test_drea
 - `test_attention_residual_queries_start_zero` verifies the pseudo-query initialization rule.
 - Shape-preservation tests exist for both `attnres` and `attnres_block`.
 - ONNX export and Node.js bundle execution pass for `standard`, `attnres`, and `attnres_block`.
+- Benchmark-methodology helpers verify checkpoint selection and loss-target reachability rules.
 
 The full suite passes with:
 
@@ -45,9 +46,11 @@ The full suite passes with:
 python -m unittest tests.test_dreamphrasegpt
 ```
 
-## Benchmark Setup
+## Benchmark Methodology
 
-These measurements were taken on:
+The benchmark script evaluates the paper's claim shape directly rather than treating raw throughput as the primary result.
+
+Measurements were taken on:
 
 - GPU: NVIDIA GeForce RTX 3090
 - Device: CUDA
@@ -56,12 +59,18 @@ These measurements were taken on:
 - Repeats: 1
 - Optimizer and schedule: unchanged from the repository baseline
 
+Each run reports three comparisons:
+
+- Quality at matched step budgets: same training steps and tokens, which is the repository's closest small-scale proxy for the paper's compute-budget plots.
+- Quality at matched wall-clock budgets: a local practical check for whether a mode reaches comparable loss within the same elapsed time.
+- Budget to reach target losses: for losses taken from a reference mode's checkpoints, how many steps and how much wall-clock time each mode needs to match or beat them.
+
 Important caveats:
 
-- These are results for DreamPhraseGPT's small character-level regime, not a direct claim about the paper's large-scale LLM setting.
+- These are results for DreamPhraseGPT's small character-level regime, not a direct reproduction of the paper's large-scale LLM setting.
 - Hyperparameters were not retuned separately for each residual mode.
+- The local implementation does not include the paper's systems-level efficiency work, so wall-clock comparisons are about this repository's implementation rather than the paper's optimized runtime path.
 - On the default 4-layer model with `--residual-blocks 8`, `attnres_block` reaches the paper's `N = L` limit because the model has 8 residual sites total.
-- `torch.compile` was not evaluated reliably in this environment because Triton temp/cache writes were blocked by the sandbox.
 
 ## Results
 
@@ -70,49 +79,67 @@ Important caveats:
 Command:
 
 ```powershell
-python scripts/benchmark_residual_modes.py --device cuda --dataset datasets/us_baby_names.txt --steps 10000 --repeats 1 --modes standard attnres attnres_block
+python scripts/benchmark_residual_modes.py --device cuda --dataset datasets/us_baby_names.txt --steps 10000 --checkpoint-every 1000 --repeats 1 --modes standard attnres attnres_block
 ```
 
-| Mode            | Final loss | Train tok/s | Forward ms |
-| --------------- | ---------: | ----------: | ---------: |
-| `standard`      |     0.7822 |     336,986 |      6.916 |
-| `attnres`       |     0.7667 |     184,178 |      8.046 |
-| `attnres_block` |     0.7667 |     184,144 |     11.565 |
+What the paper-aligned comparisons show:
+
+- At matched step budgets, `attnres` and `attnres_block` are consistently lower loss than `standard`. At 10,000 steps: `standard` `0.7822`, `attnres` `0.7667`, `attnres_block` `0.7667`.
+- At matched wall-clock budgets, `standard` stays ahead in this implementation. At the `standard` 10,000-step budget of `164.31s`, both Attention Residual variants had only reached their 3,000-step checkpoint and were still at `0.8853`.
+- For target-loss efficiency, both Attention Residual variants reached the `standard` 10,000-step loss (`0.7822`) by 8,000 steps, but they needed `347.60s` and `349.96s` respectively, versus `164.31s` for `standard`.
+- Because the 4-layer model has 8 residual sites and this run used `--residual-blocks 8`, `attnres_block` reduces to the `N = L` limit and is expected to match Full AttnRes. The identical traces are therefore expected.
 
 ### Default 4-layer model, `english_words.txt`
 
 Command:
 
 ```powershell
-python scripts/benchmark_residual_modes.py --device cuda --dataset datasets/english_words.txt --steps 10000 --repeats 1 --modes standard attnres attnres_block
+python scripts/benchmark_residual_modes.py --device cuda --dataset datasets/english_words.txt --steps 10000 --checkpoint-every 1000 --repeats 1 --modes standard attnres attnres_block
 ```
 
-| Mode            | Final loss | Train tok/s | Forward ms |
-| --------------- | ---------: | ----------: | ---------: |
-| `standard`      |     1.0246 |     409,274 |      3.165 |
-| `attnres`       |     1.0248 |     315,922 |      5.810 |
-| `attnres_block` |     1.0248 |     242,675 |      5.938 |
+What the paper-aligned comparisons show:
+
+- At matched step budgets, the Attention Residual variants are slightly better at 1,000 to 2,000 steps, then slightly worse from 3,000 steps onward. At 10,000 steps: `standard` `1.0246`, `attnres` `1.0248`, `attnres_block` `1.0248`.
+- At matched wall-clock budgets, `standard` is always ahead. At the `standard` 10,000-step budget of `240.29s`, the Attention Residual variants had only reached their 5,000-step checkpoint and were still at `1.0340`.
+- For target-loss efficiency, the Attention Residual variants needed `1.25x` as many steps and about `2.29x` as much wall-clock time to reach the `standard` 4,000-step loss (`1.0625`), and they never reached the `standard` 6,000-step loss (`1.0062`) within 10,000 steps.
+
+### Deeper 8-layer model, `us_baby_names.txt`, `--residual-blocks 8`
+
+Command:
+
+```powershell
+python scripts/benchmark_residual_modes.py --device cuda --dataset datasets/us_baby_names.txt --steps 6000 --checkpoint-every 1000 --repeats 1 --n-layer 8 --residual-blocks 8 --modes standard attnres attnres_block
+```
+
+This run explicitly tests Block AttnRes away from the shallow `N = L` limit, because the model has 16 residual sites and only 8 block summaries.
+
+What the paper-aligned comparisons show:
+
+- At matched step budgets, `standard` stays ahead throughout. At 6,000 steps: `standard` `0.7638`, `attnres` `0.7802`, `attnres_block` `0.7861`.
+- At matched wall-clock budgets, `standard` also stays ahead throughout.
+- `attnres_block` is somewhat cheaper than Full AttnRes in this deeper regime. To reach the `standard` 4,000-step loss (`0.8415`), Full AttnRes needed 5,000 steps and `435.62s`, while Block AttnRes needed 5,000 steps and `406.95s`.
+- Even in that deeper non-`N = L` regime, both Attention Residual variants remained clearly behind `standard` in both quality-per-time and final loss.
 
 ## Interpretation
 
-After these runs, the picture is:
+The current evaluation shows:
 
-- The implementation matches the paper's key mechanics closely enough to be tested directly rather than inferred.
-- On the default 4-layer model, `attnres_block` does not provide a distinct advantage over `attnres` when `--residual-blocks 8`, because that setting reaches the paper's `N = L` limit.
-- On `us_baby_names.txt`, both AttnRes variants improve final loss slightly over `standard`, but they do so at about `0.55x` training throughput.
-- On `english_words.txt`, both AttnRes variants end essentially tied with `standard` in loss while remaining slower.
+- On the default 4-layer `us_baby_names` run, Full AttnRes improves loss per training step, which is the closest local analogue to the paper's "better quality at a compute budget" claim.
+- In this repository's implementation, that step-level advantage does not translate into a wall-clock advantage. The same targets take about `2.1x` to `3.0x` as much elapsed time.
+- On `english_words.txt`, the Attention Residual variants do not provide a meaningful quality advantage even before wall-clock is considered.
+- In the deeper 8-layer block-compression test, `attnres_block` is somewhat more efficient than Full AttnRes, but both remain behind `standard`.
 - `standard` remains the default residual mode for this repository.
 
 ## Current Read
 
-For the current 4-layer repository default:
+For DreamPhraseGPT:
 
-- `attnres` is a valid experimental mode.
-- `attnres_block` is also implemented correctly, but the shallow default model does not expose a meaningful block-compression tradeoff at `--residual-blocks 8`.
-- The current evidence does not justify replacing `standard`.
+- `attnres` and `attnres_block` are both implemented correctly and can be evaluated against the paper's claim shape.
+- The current evidence does not support replacing `standard`.
+- The strongest local result is narrow: on 4-layer `us_baby_names`, Attention Residuals improve loss per step but not loss per second.
 
 If this work continues, the next steps are:
 
-1. Run deeper benchmarks where `attnres_block` does not collapse to the `N = L` limit.
-1. Retune hyperparameters separately for `attnres` and `attnres_block` instead of reusing the baseline schedule.
-1. Compare modes at equal wall-clock budgets in addition to equal step counts.
+1. Retune hyperparameters separately for the Attention Residual modes instead of reusing the baseline schedule.
+1. Run larger and deeper models where Block AttnRes has room to trade block summaries against depth.
+1. Add local latency experiments only after implementing more of the paper's optimized Block AttnRes runtime strategy.

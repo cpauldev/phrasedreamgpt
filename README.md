@@ -237,7 +237,7 @@ python -m dreamphrasegpt --dataset mydata.txt --residual-mode attnres_block --re
 python -m dreamphrasegpt --dataset mydata.txt --no-save
 python -m dreamphrasegpt --models
 python -m dreamphrasegpt --compare --compare-steps 500
-python scripts/benchmark_residual_modes.py --device cuda --steps 150 --repeats 3
+python scripts/benchmark_residual_modes.py --device cuda --steps 10000 --checkpoint-every 1000
 ```
 
 For the full CLI, run:
@@ -270,7 +270,8 @@ Attention Residuals research for this repository is documented in [docs/research
 
 In brief:
 
-- `attnres` and `attnres_block` both train, serialize, export to ONNX, and run through the Node.js bundle path.
-- The implementation matches the paper's key mechanics, including zero-initialized pseudo-queries and Block AttnRes boundaries over attention/MLP residual sites.
-- On the default 4-layer model with `--residual-blocks 8`, `attnres_block` reaches the paper's `N = L` limit, so it does not expose a distinct shallow-model advantage over `attnres`.
+- The benchmark reports the paper's claim shape directly: quality at matched step budgets, quality at matched wall-clock budgets, and budget required to reach target losses.
+- On the default 4-layer `us_baby_names` setup, `attnres` reaches some `standard` losses in fewer steps, but not in less wall-clock time on this implementation.
+- On the default 4-layer `english_words` setup and a deeper 8-layer block-compression run, `standard` remains stronger on both final loss and quality-per-time.
+- `attnres_block` is only meaningfully distinct from Full AttnRes once the model has more residual sites than requested block summaries.
 - `standard` remains the default configuration for this repository.

@@ -11,7 +11,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from dreamphrasegpt import artifacts, interactive
+from dreamphrasegpt import artifacts, benchmarking, interactive
 from dreamphrasegpt import cli as app
 from dreamphrasegpt import runtime as runtime_module
 from dreamphrasegpt.config import (
@@ -30,8 +30,10 @@ from dreamphrasegpt.config import (
 from dreamphrasegpt.runtime import (
     AttentionResidual,
     BatchProvider,
+    TrainingTracePoint,
     build_model,
     residual_site_count,
+    train_with_trace,
 )
 from dreamphrasegpt.source_filter import build_bloom_source_filter
 
@@ -55,16 +57,18 @@ def make_training_config(
     dataset_path: str | None = None,
     seed: int = 42,
     residual_mode: str = MODEL_RESIDUAL_MODE_STANDARD,
+    steps: int = 2,
+    n_layer: int = 2,
 ) -> TrainingConfig:
     return TrainingConfig(
         dataset_path=dataset_path,
         seed=seed,
-        steps=2,
+        steps=steps,
         batch_size=2,
         model=ModelConfig.from_dimensions(
             vocab_size=1,
             block_size=4,
-            n_layer=2,
+            n_layer=n_layer,
             n_embd=96,
             n_head=3,
             residual_mode=residual_mode,
@@ -87,6 +91,38 @@ def make_generation_config(*, samples: int = 0) -> GenerationConfig:
         num_samples=samples,
         temperature=0.8,
         requested_block_size=4,
+    )
+
+
+def bind_training_to_dataset(
+    training_config: TrainingConfig,
+    dataset: Dataset,
+) -> TrainingConfig:
+    """Replace the placeholder vocab size in a test config with dataset values."""
+    return TrainingConfig(
+        dataset_path=training_config.dataset_path,
+        seed=training_config.seed,
+        steps=training_config.steps,
+        batch_size=training_config.batch_size,
+        model=ModelConfig.from_dimensions(
+            vocab_size=dataset.vocab_size,
+            block_size=training_config.model.block_size,
+            n_layer=training_config.model.n_layer,
+            n_embd=training_config.model.n_embd,
+            n_head=training_config.model.n_head,
+            residual_mode=training_config.model.residual_mode,
+            residual_block_count=training_config.model.residual_block_count,
+        ),
+        learning_rate=training_config.learning_rate,
+        beta1=training_config.beta1,
+        beta2=training_config.beta2,
+        eps=training_config.eps,
+        weight_decay=training_config.weight_decay,
+        requested_device=training_config.requested_device,
+        requested_dtype=training_config.requested_dtype,
+        amp_requested=training_config.amp_requested,
+        compile_requested=training_config.compile_requested,
+        print_every=training_config.print_every,
     )
 
 
@@ -529,6 +565,87 @@ class RuntimeTests(unittest.TestCase):
         block_logits = block_model(idx)
 
         self.assertTrue(torch.allclose(full_logits, block_logits, atol=1e-6))
+
+    def test_train_with_trace_records_requested_checkpoints(self) -> None:
+        dataset = Dataset(
+            data=torch.tensor([4, 0, 1, 2, 3, 4, 0, 2, 1, 3, 4], dtype=torch.long),
+            id_to_char=["a", "b", "c", "d"],
+            bos_id=4,
+            vocab_size=5,
+        )
+        training = bind_training_to_dataset(
+            make_training_config(
+                dataset_path="trace.txt",
+                steps=4,
+            ),
+            dataset,
+        )
+
+        result, trace = train_with_trace(
+            training,
+            dataset,
+            torch.device("cpu"),
+            trace_steps=(2, 4),
+            report_progress=False,
+        )
+
+        self.assertEqual([point.run_step for point in trace], [2, 4])
+        self.assertEqual(trace[-1].completed_steps, result.completed_steps)
+        self.assertEqual(trace[-1].total_tokens, result.total_tokens)
+        self.assertGreater(trace[-1].elapsed, 0.0)
+
+
+class BenchmarkingTests(unittest.TestCase):
+    @staticmethod
+    def _sample_trace() -> list[TrainingTracePoint]:
+        return [
+            TrainingTracePoint(
+                run_step=2,
+                completed_steps=2,
+                total_tokens=20,
+                elapsed=1.0,
+                final_loss=1.5,
+            ),
+            TrainingTracePoint(
+                run_step=4,
+                completed_steps=4,
+                total_tokens=40,
+                elapsed=2.0,
+                final_loss=1.1,
+            ),
+            TrainingTracePoint(
+                run_step=6,
+                completed_steps=6,
+                total_tokens=60,
+                elapsed=3.0,
+                final_loss=0.9,
+            ),
+        ]
+
+    def test_resolve_checkpoint_steps_includes_requested_and_final(self) -> None:
+        checkpoints = benchmarking.resolve_checkpoint_steps(
+            10,
+            checkpoint_every=4,
+            explicit_steps=[3, 12, -1, 8],
+        )
+
+        self.assertEqual(checkpoints, (3, 4, 8, 10))
+
+    def test_first_trace_meeting_loss_returns_first_success(self) -> None:
+        trace = self._sample_trace()
+
+        reached = benchmarking.first_trace_meeting_loss(trace, 1.0)
+
+        self.assertIsNotNone(reached)
+        self.assertEqual(reached.run_step, 6)
+
+    def test_latest_trace_within_elapsed_returns_last_budget_fit(self) -> None:
+        trace = self._sample_trace()
+
+        reached = benchmarking.latest_trace_within_elapsed(trace, 2.2)
+
+        self.assertIsNotNone(reached)
+        self.assertEqual(reached.run_step, 4)
 
 
 class ArtifactTests(unittest.TestCase):

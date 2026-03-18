@@ -1,3 +1,13 @@
+"""Run paper-aligned residual-mode comparisons for DreamPhraseGPT.
+
+This script compares residual modes along the same axes used in the research
+note:
+
+- quality at matched step budgets
+- quality at matched wall-clock budgets
+- budget required to reach target losses
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -5,35 +15,59 @@ import gc
 import importlib
 import statistics
 import sys
-import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+if TYPE_CHECKING:
+    from dreamphrasegpt.runtime import TrainingResult, TrainingTracePoint
+
 
 @dataclass(frozen=True)
 class ProjectModules:
+    """Dynamically loaded project API used by this standalone script."""
+
     default_residual_block_count: int
     residual_mode_attnres: str
     residual_mode_attnres_block: str
     residual_mode_standard: str
     model_config: type
     training_config: type
+    resolve_checkpoint_steps: object
+    first_trace_meeting_loss: object
+    latest_trace_within_elapsed: object
     load_dataset: object
     resolve_device: object
+    residual_site_count: object
     seed_everything: object
-    synchronize_device: object
-    train_once: object
+    train_with_trace: object
     unwrap_model: object
+
+
+@dataclass(frozen=True)
+class MeanTracePoint:
+    """Average of aligned trace checkpoints across repeated runs."""
+
+    run_step: int
+    completed_steps: float
+    total_tokens: float
+    elapsed: float
+    final_loss: float
+
+
+Trace = Sequence["TrainingTracePoint"]
 
 
 def load_project_modules() -> ProjectModules:
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
+    benchmark_module = importlib.import_module("dreamphrasegpt.benchmarking")
     config_module = importlib.import_module("dreamphrasegpt.config")
     runtime_module = importlib.import_module("dreamphrasegpt.runtime")
     return ProjectModules(
@@ -43,11 +77,14 @@ def load_project_modules() -> ProjectModules:
         residual_mode_standard=config_module.MODEL_RESIDUAL_MODE_STANDARD,
         model_config=config_module.ModelConfig,
         training_config=config_module.TrainingConfig,
+        resolve_checkpoint_steps=benchmark_module.resolve_checkpoint_steps,
+        first_trace_meeting_loss=benchmark_module.first_trace_meeting_loss,
+        latest_trace_within_elapsed=benchmark_module.latest_trace_within_elapsed,
         load_dataset=runtime_module.load_dataset,
         resolve_device=runtime_module.resolve_device,
+        residual_site_count=runtime_module.residual_site_count,
         seed_everything=runtime_module.seed_everything,
-        synchronize_device=runtime_module.synchronize_device,
-        train_once=runtime_module.train_once,
+        train_with_trace=runtime_module.train_with_trace,
         unwrap_model=runtime_module.unwrap_model,
     )
 
@@ -57,7 +94,11 @@ PROJECT = load_project_modules()
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Benchmark DreamPhraseGPT standard residuals against Attention Residuals."
+        description=(
+            "Evaluate DreamPhraseGPT residual modes using paper-aligned comparisons: "
+            "quality at matched training budgets, quality at matched wall-clock budgets, "
+            "and budget required to reach target losses."
+        )
     )
     parser.add_argument(
         "--dataset",
@@ -68,10 +109,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--device",
         default="cuda",
         choices=["auto", "cpu", "cuda", "mps"],
-        help="Execution device for both modes.",
+        help="Execution device for all modes.",
     )
-    parser.add_argument("--steps", type=int, default=200, help="Training steps per run.")
-    parser.add_argument("--repeats", type=int, default=3, help="Repeats per residual mode.")
+    parser.add_argument("--steps", type=int, default=3000, help="Training steps per run.")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=1000,
+        help="Trace interval for budget comparisons.",
+    )
+    parser.add_argument(
+        "--checkpoint-steps",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Optional explicit checkpoint steps to include in addition to --checkpoint-every.",
+    )
+    parser.add_argument("--repeats", type=int, default=1, help="Repeats per residual mode.")
     parser.add_argument("--batch-size", type=int, default=256, help="Training batch size.")
     parser.add_argument("--block-size", type=int, default=32, help="Context length.")
     parser.add_argument("--n-layer", type=int, default=4, help="Transformer depth.")
@@ -107,19 +161,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="Enable torch.compile for both modes.",
-    )
-    parser.add_argument(
-        "--inference-iters",
-        type=int,
-        default=80,
-        help="Timed forward passes per run.",
-    )
-    parser.add_argument(
-        "--inference-warmup",
-        type=int,
-        default=10,
-        help="Warmup forward passes per run.",
+        help="Enable torch.compile for all modes.",
     )
     parser.add_argument(
         "--modes",
@@ -135,6 +177,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             PROJECT.residual_mode_attnres_block,
         ],
         help="Residual modes to compare.",
+    )
+    parser.add_argument(
+        "--target-mode",
+        choices=[
+            PROJECT.residual_mode_standard,
+            PROJECT.residual_mode_attnres,
+            PROJECT.residual_mode_attnres_block,
+        ],
+        default=PROJECT.residual_mode_standard,
+        help="Mode used to define time budgets and target losses.",
     )
     return parser
 
@@ -173,65 +225,163 @@ def make_training_config(
     )
 
 
-@torch.inference_mode()
-def benchmark_forward_latency_ms(
-    model: torch.nn.Module,
-    sample_idx: torch.Tensor,
-    device: torch.device,
+def mean_trace(traces: Sequence[Trace]) -> list[MeanTracePoint]:
+    """Average aligned checkpoints across repeated runs of one mode."""
+    if not traces:
+        return []
+
+    first_trace = traces[0]
+    trace_len = len(first_trace)
+    for trace in traces[1:]:
+        if len(trace) != trace_len:
+            raise ValueError("all traces must have the same checkpoint layout")
+
+    mean_points: list[MeanTracePoint] = []
+    for index in range(trace_len):
+        points = [trace[index] for trace in traces]
+        run_step = points[0].run_step
+        mean_points.append(
+            MeanTracePoint(
+                run_step=run_step,
+                completed_steps=statistics.fmean(point.completed_steps for point in points),
+                total_tokens=statistics.fmean(point.total_tokens for point in points),
+                elapsed=statistics.fmean(point.elapsed for point in points),
+                final_loss=statistics.fmean(point.final_loss for point in points),
+            )
+        )
+    return mean_points
+
+
+def format_ratio(numerator: float | None, denominator: float | None) -> str:
+    if numerator is None or denominator in {None, 0}:
+        return "n/a"
+    return f"{numerator / denominator:.3f}x"
+
+
+def format_step_budget(point: MeanTracePoint) -> str:
+    return f"step {point.run_step:,}"
+
+
+def format_elapsed_budget(point: MeanTracePoint) -> str:
+    return f"{point.elapsed:.2f}s"
+
+
+def print_quality_at_step_budgets(
+    modes: Sequence[str],
+    mean_traces: dict[str, list[MeanTracePoint]],
+) -> None:
+    """Report loss reached after the same number of training steps."""
+    print("\n--- Quality at Matched Step Budgets ---")
+    reference_trace = next(iter(mean_traces.values()))
+    checkpoint_steps = [point.run_step for point in reference_trace]
+    for step in checkpoint_steps:
+        reference_point = next(point for point in reference_trace if point.run_step == step)
+        print(f"\n{format_step_budget(reference_point)}")
+        for mode in modes:
+            point = next(point for point in mean_traces[mode] if point.run_step == step)
+            print(
+                f"  {mode:14}"
+                f"loss {point.final_loss:.4f}"
+                f"  elapsed {point.elapsed:.2f}s"
+                f"  tokens {int(point.total_tokens):,}"
+            )
+
+
+def print_quality_at_elapsed_budgets(
+    modes: Sequence[str],
+    mean_traces: dict[str, list[MeanTracePoint]],
     *,
-    warmup: int,
-    iters: int,
-) -> float:
-    model.eval()
-    sample_idx = sample_idx.to(device)
+    target_mode: str,
+) -> None:
+    """Report loss reached under wall-clock budgets taken from one mode."""
+    print("\n--- Quality at Matched Wall-Clock Budgets ---")
+    for budget_source in mean_traces[target_mode]:
+        print(
+            f"\n{format_elapsed_budget(budget_source)}"
+            f"  (from {target_mode} at step {budget_source.run_step:,})"
+        )
+        for mode in modes:
+            point = PROJECT.latest_trace_within_elapsed(mean_traces[mode], budget_source.elapsed)
+            if point is None:
+                print(f"  {mode:14}no checkpoint within budget")
+                continue
+            print(
+                f"  {mode:14}"
+                f"step {point.run_step:,}"
+                f"  loss {point.final_loss:.4f}"
+                f"  elapsed {point.elapsed:.2f}s"
+            )
 
-    for _ in range(warmup):
-        model(sample_idx)
-    PROJECT.synchronize_device(device)
 
-    started_at = time.perf_counter()
-    for _ in range(iters):
-        model(sample_idx)
-    PROJECT.synchronize_device(device)
+def print_target_loss_efficiency(
+    modes: Sequence[str],
+    traces_by_mode: dict[str, list[list[TrainingTracePoint]]],
+    mean_traces: dict[str, list[MeanTracePoint]],
+    *,
+    target_mode: str,
+) -> None:
+    """Report the budget each mode needs to match target-mode checkpoint losses."""
+    print("\n--- Budget to Reach Target Losses ---")
+    print(f"targets are taken from {target_mode} checkpoint losses")
 
-    elapsed = max(time.perf_counter() - started_at, 1e-9)
-    return (elapsed / iters) * 1000.0
+    for target_source in mean_traces[target_mode]:
+        print(
+            f"\ntarget loss {target_source.final_loss:.4f}"
+            f"  ({target_mode} checkpoint step {target_source.run_step:,})"
+        )
+        for mode in modes:
+            reached_points = [
+                PROJECT.first_trace_meeting_loss(trace, target_source.final_loss)
+                for trace in traces_by_mode[mode]
+            ]
+            successes = [point for point in reached_points if point is not None]
+            if not successes:
+                max_steps = traces_by_mode[mode][0][-1].run_step
+                print(f"  {mode:14}not reached within {max_steps:,} steps")
+                continue
 
-
-def print_mode_summary(mode: str, rows: list[dict[str, float]]) -> None:
-    loss_mean = statistics.fmean(row["final_loss"] for row in rows)
-    tok_s_mean = statistics.fmean(row["tok_s"] for row in rows)
-    latency_mean = statistics.fmean(row["forward_ms"] for row in rows)
-    params = int(rows[0]["params"])
-    print(
-        f"{mode:8}  params {params:>8,}"
-        f"  loss {loss_mean:>7.4f}"
-        f"  tok/s {tok_s_mean:>10,.0f}"
-        f"  fwd {latency_mean:>8.3f} ms"
-    )
+            mean_step = statistics.fmean(point.run_step for point in successes)
+            mean_elapsed = statistics.fmean(point.elapsed for point in successes)
+            print(
+                f"  {mode:14}"
+                f"step {mean_step:>8.1f}"
+                f"  elapsed {mean_elapsed:>7.2f}s"
+                f"  vs-step {format_ratio(mean_step, target_source.run_step):>7}"
+                f"  vs-time {format_ratio(mean_elapsed, target_source.elapsed):>7}"
+                f"  success {len(successes)}/{len(reached_points)}"
+            )
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    if PROJECT.residual_mode_standard not in args.modes:
-        raise SystemExit("--modes must include standard so deltas can be computed.")
+    if args.target_mode not in args.modes:
+        raise SystemExit("--target-mode must be included in --modes.")
+
     dataset_path = str(Path(args.dataset))
     device = PROJECT.resolve_device(args.device)
-
-    PROJECT.seed_everything(args.seed)
     dataset = PROJECT.load_dataset(dataset_path, shuffle=False)
+    checkpoint_steps = PROJECT.resolve_checkpoint_steps(
+        args.steps,
+        checkpoint_every=args.checkpoint_every,
+        explicit_steps=args.checkpoint_steps,
+    )
 
-    sample_seq_len = min(args.block_size, max(1, dataset.data.numel() - 1))
-    sample_idx = dataset.data[:sample_seq_len].unsqueeze(0)
+    traces_by_mode: dict[str, list[list[TrainingTracePoint]]] = {mode: [] for mode in args.modes}
+    params_by_mode: dict[str, int] = {}
+    final_results: dict[str, list[TrainingResult]] = {mode: [] for mode in args.modes}
 
-    results: dict[str, list[dict[str, float]]] = {mode: [] for mode in args.modes}
-
-    print("\n--- Residual Benchmark ---")
-    print(f"dataset   {Path(dataset_path).name}")
-    print(f"device    {device}")
-    print(f"steps     {args.steps}")
-    print(f"repeats   {args.repeats}")
-    print(f"compile   {'on' if args.compile else 'off'}")
+    print("\n--- Paper-Aligned Residual Evaluation ---")
+    print(f"dataset          {Path(dataset_path).name}")
+    print(f"device           {device}")
+    print(f"steps            {args.steps}")
+    print(f"checkpoint steps {', '.join(str(step) for step in checkpoint_steps)}")
+    print(f"repeats          {args.repeats}")
+    print(f"target mode      {args.target_mode}")
+    print(f"layers           {args.n_layer}")
+    print(f"residual sites   {PROJECT.residual_site_count(args.n_layer)}")
+    if PROJECT.residual_mode_attnres_block in args.modes:
+        print(f"residual blocks  {args.residual_blocks}")
+    print(f"compile          {'on' if args.compile else 'off'}")
 
     for mode in args.modes:
         print(f"\n=== {mode} ===")
@@ -243,30 +393,22 @@ def main() -> None:
                 vocab_size=dataset.vocab_size,
                 residual_mode=mode,
             )
-            result = PROJECT.train_once(training, dataset, device)
-            raw_model = PROJECT.unwrap_model(result.model)
-            params = sum(parameter.numel() for parameter in raw_model.parameters())
-            forward_ms = benchmark_forward_latency_ms(
-                result.model,
-                sample_idx,
+            result, trace = PROJECT.train_with_trace(
+                training,
+                dataset,
                 device,
-                warmup=args.inference_warmup,
-                iters=args.inference_iters,
+                trace_steps=checkpoint_steps,
+                report_progress=False,
             )
-            results[mode].append(
-                {
-                    "final_loss": result.final_loss,
-                    "tok_s": result.tok_s,
-                    "forward_ms": forward_ms,
-                    "params": float(params),
-                }
-            )
-
+            raw_model = PROJECT.unwrap_model(result.model)
+            params_by_mode[mode] = sum(parameter.numel() for parameter in raw_model.parameters())
+            traces_by_mode[mode].append(trace)
+            final_results[mode].append(result)
             print(
                 f"repeat {repeat + 1}/{args.repeats}"
-                f"  loss {result.final_loss:.4f}"
+                f"  final loss {result.final_loss:.4f}"
+                f"  elapsed {result.elapsed:.2f}s"
                 f"  tok/s {result.tok_s:,.0f}"
-                f"  fwd {forward_ms:.3f} ms"
             )
 
             del result
@@ -274,27 +416,27 @@ def main() -> None:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
-    print("\n--- Summary ---")
-    for mode in args.modes:
-        print_mode_summary(mode, results[mode])
+    mean_traces = {mode: mean_trace(traces) for mode, traces in traces_by_mode.items()}
 
-    standard_rows = results[PROJECT.residual_mode_standard]
-    standard_loss = statistics.fmean(row["final_loss"] for row in standard_rows)
-    standard_tok_s = statistics.fmean(row["tok_s"] for row in standard_rows)
-    standard_forward = statistics.fmean(row["forward_ms"] for row in standard_rows)
-
-    print("\n--- Delta vs Standard ---")
+    print("\n--- Final Snapshot ---")
     for mode in args.modes:
-        if mode == PROJECT.residual_mode_standard:
-            continue
-        mode_rows = results[mode]
-        mode_loss = statistics.fmean(row["final_loss"] for row in mode_rows)
-        mode_tok_s = statistics.fmean(row["tok_s"] for row in mode_rows)
-        mode_forward = statistics.fmean(row["forward_ms"] for row in mode_rows)
-        print(mode)
-        print(f"  loss     {mode_loss - standard_loss:+.4f}")
-        print(f"  tok/s    {mode_tok_s / standard_tok_s:.3f}x")
-        print(f"  forward  {mode_forward / standard_forward:.3f}x")
+        result_rows = final_results[mode]
+        print(
+            f"{mode:14}"
+            f"params {params_by_mode[mode]:>9,}"
+            f"  final loss {statistics.fmean(row.final_loss for row in result_rows):.4f}"
+            f"  elapsed {statistics.fmean(row.elapsed for row in result_rows):.2f}s"
+            f"  tok/s {statistics.fmean(row.tok_s for row in result_rows):,.0f}"
+        )
+
+    print_quality_at_step_budgets(args.modes, mean_traces)
+    print_quality_at_elapsed_budgets(args.modes, mean_traces, target_mode=args.target_mode)
+    print_target_loss_efficiency(
+        args.modes,
+        traces_by_mode,
+        mean_traces,
+        target_mode=args.target_mode,
+    )
 
 
 if __name__ == "__main__":

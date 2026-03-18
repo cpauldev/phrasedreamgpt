@@ -4,8 +4,9 @@ import importlib.util
 import random
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -541,6 +542,17 @@ class BatchProvider:
         return x, y
 
 
+@dataclass(frozen=True)
+class TrainingTracePoint:
+    """A checkpoint captured during one `train_with_trace` call."""
+
+    run_step: int
+    completed_steps: int
+    total_tokens: int
+    elapsed: float
+    final_loss: float
+
+
 def resolve_amp_settings(
     amp_pref: bool | None, dtype_arg: str, device: torch.device
 ) -> PrecisionSettings:
@@ -762,13 +774,59 @@ def verify_resume_runtime(saved_training_config: dict, runtime: RuntimeSettings)
         )
 
 
-def train_once(
+def _normalize_trace_steps(
+    requested_steps: Collection[int] | None,
+    total_steps: int,
+) -> tuple[int, ...]:
+    if requested_steps is None:
+        requested_steps = ()
+
+    normalized_steps = {
+        step
+        for step in requested_steps
+        if isinstance(step, int) and step > 0 and step <= total_steps
+    }
+    normalized_steps.add(total_steps)
+    return tuple(sorted(normalized_steps))
+
+
+def _record_trace_point(
+    trace: list[TrainingTracePoint],
+    *,
+    run_step: int,
+    completed_steps_before: int,
+    total_tokens: int,
+    started_at: float,
+    final_loss: float,
+) -> None:
+    elapsed = max(time.perf_counter() - started_at, 1e-9)
+    trace.append(
+        TrainingTracePoint(
+            run_step=run_step,
+            completed_steps=completed_steps_before + run_step,
+            total_tokens=total_tokens,
+            elapsed=elapsed,
+            final_loss=final_loss,
+        )
+    )
+
+
+def train_with_trace(
     training_config: TrainingConfig,
     dataset: Dataset,
     device: torch.device,
     *,
     resume_bundle: ArtifactBundle | None = None,
-) -> TrainingResult:
+    trace_steps: Collection[int] | None = None,
+    report_progress: bool = True,
+) -> tuple[TrainingResult, list[TrainingTracePoint]]:
+    """Train once and optionally capture intermediate checkpoints.
+
+    `trace_steps` are run-local step numbers such as `(1000, 2000, 3000)`.
+    The final step is always recorded in the returned trace, even if it is not
+    listed explicitly, so downstream benchmark code can rely on a terminal
+    checkpoint being present.
+    """
     configure_matmul(device)
 
     if resume_bundle is None:
@@ -827,30 +885,34 @@ def train_once(
         device_label += f"  ({torch.cuda.get_device_name(0)})"
     amp_label = runtime.amp_dtype if runtime.amp_enabled else "off"
 
-    print_section("model")
-    print(f"params   {param_count:,}")
-    print(f"layers   {cfg.n_layer}")
-    print(f"heads    {cfg.n_head}")
-    print(f"embd     {cfg.n_embd}")
-    print(f"block    {cfg.block_size}")
-    print(f"resid    {cfg.residual_mode}")
-    if cfg.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
-        print(f"rblocks  {unwrap_model(model).effective_residual_block_count}")
+    if report_progress:
+        print_section("model")
+        print(f"params   {param_count:,}")
+        print(f"layers   {cfg.n_layer}")
+        print(f"heads    {cfg.n_head}")
+        print(f"embd     {cfg.n_embd}")
+        print(f"block    {cfg.block_size}")
+        print(f"resid    {cfg.residual_mode}")
+        if cfg.residual_mode == MODEL_RESIDUAL_MODE_ATTNRES_BLOCK:
+            print(f"rblocks  {unwrap_model(model).effective_residual_block_count}")
 
-    print_section("training")
-    print(f"device   {device_label}")
-    print(f"amp      {amp_label}")
-    print(f"compile  {'on' if runtime.compile_enabled else 'off'}")
-    print(f"steps    {target_total_steps:,}")
-    print(f"batch    {training_config.batch_size}")
-    print(f"lr       {training_config.learning_rate:.2e}")
-    if resume_bundle is not None:
-        print(f"from     step {completed_steps_before:,}")
-    print()
+        print_section("training")
+        print(f"device   {device_label}")
+        print(f"amp      {amp_label}")
+        print(f"compile  {'on' if runtime.compile_enabled else 'off'}")
+        print(f"steps    {target_total_steps:,}")
+        print(f"batch    {training_config.batch_size}")
+        print(f"lr       {training_config.learning_rate:.2e}")
+        if resume_bundle is not None:
+            print(f"from     step {completed_steps_before:,}")
+        print()
 
     step_w = len(str(target_total_steps))
     started_at = time.perf_counter()
     model.train()
+    normalized_trace_steps = _normalize_trace_steps(trace_steps, training_config.steps)
+    trace_step_set = set(normalized_trace_steps)
+    trace: list[TrainingTracePoint] = []
 
     for step in range(training_config.steps):
         global_step = completed_steps_before + step
@@ -878,12 +940,25 @@ def train_once(
 
         final_loss = float(loss.item())
         total_tokens += xb.numel()
+        run_step = step + 1
 
-        if ((step + 1) % training_config.print_every == 0) or (step + 1 == training_config.steps):
+        if run_step in trace_step_set:
+            _record_trace_point(
+                trace,
+                run_step=run_step,
+                completed_steps_before=completed_steps_before,
+                total_tokens=total_tokens,
+                started_at=started_at,
+                final_loss=final_loss,
+            )
+
+        if report_progress and (
+            (run_step % training_config.print_every == 0) or run_step == training_config.steps
+        ):
             elapsed = max(time.perf_counter() - started_at, 1e-9)
             run_tokens = total_tokens - total_tokens_before
             tok_s = run_tokens / elapsed
-            steps_s = (step + 1) / elapsed
+            steps_s = run_step / elapsed
             print(
                 f"step {global_step + 1:{step_w}d}/{target_total_steps}"
                 f"  loss {final_loss:.4f}"
@@ -896,7 +971,7 @@ def train_once(
 
     elapsed = max(time.perf_counter() - started_at, 1e-9)
     run_tokens = total_tokens - total_tokens_before
-    return TrainingResult(
+    result = TrainingResult(
         model=model,
         elapsed=elapsed,
         total_tokens=total_tokens,
@@ -907,6 +982,24 @@ def train_once(
         scaler_state=scaler.state_dict() if scaler is not None and scaler.is_enabled() else None,
         runtime=runtime,
     )
+    return result, trace
+
+
+def train_once(
+    training_config: TrainingConfig,
+    dataset: Dataset,
+    device: torch.device,
+    *,
+    resume_bundle: ArtifactBundle | None = None,
+) -> TrainingResult:
+    result, _ = train_with_trace(
+        training_config,
+        dataset,
+        device,
+        resume_bundle=resume_bundle,
+        report_progress=True,
+    )
+    return result
 
 
 @torch.no_grad()
